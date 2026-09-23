@@ -11,3 +11,7 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Engine outputs, review sheets and hand-corrected references (copyrighted text)
+work/
+references/
