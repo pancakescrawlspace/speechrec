@@ -86,7 +86,6 @@ videos in the same process.
 - Try Voxtral Mini 4B Realtime.
 - Proper timestamps for Canary via its CTC model (forced alignment).
 - wav2vec2 with its language model (`kenlm`, `pyctcdecode`).
-- Vote `.srt`: cut cues at sentence ends too, so fewer cues start mid-sentence.
 - Hand-correct a reference set (René), starting from the vote `.srt` files in `work/vote/`,
   then score all engines against it with `compare.py --reference references`.
 
@@ -500,6 +499,69 @@ Findings:
 Known weak spot of the vote `.srt`: cues are cut by pause/length only, not at sentence
 ends, so 985 cues start mid-sentence with a lowercase word (Whisper's own `.srt`: 143).
 Worth fixing before hand-correcting (see TODO).
+
+### Better majority-vote drafts
+Checked the vote `.srt` files before René starts correcting them, and fixed four problems.
+None of them needed an engine rerun; `align.py` takes 20 s for all 48 videos.
+
+1. **Cues now also end at the end of a sentence** (`words_to_cues` in `transcribe.py`: after
+   a word ending in `.`, `!`, `?` or `…`, also behind a closing quote). This only affects
+   the vote: wav2vec2 and Vosk write no punctuation, and Parakeet makes its own cues.
+2. **Capitals and punctuation are voted on too.** Whisper sometimes writes a whole stretch
+   without capitals or punctuation ("bentje keek om zich heen de bomen waren zo hoog…" in
+   `bentje/LeesWijs-bladerboek-30`), and the vote copied that since it took spelling from
+   the first engine on the command line. Now the spelling is the most common form among
+   the engines with the winning word that use capitals or punctuation somewhere in that
+   window. An intermediate version that only counted formatted forms capitalised
+   mid-sentence words ("riep ze, Maar Sarah"), because lowercase "maar" didn't count.
+3. **Two-step vote.** In `beestje/LeesWijs-bladerboek-5`, "Dag muis, zegt Mik" (a line
+   Whisper skipped) came out as "muis, zegt": three engines had no word at the "Mik"
+   position, and the four that did spelled it four ways (mik, mick, nik, nick), so "no
+   word" won with 2 votes against 1 each. Now the vote first decides whether there is a
+   word (engines with any word against engines with none; a tie keeps the word), then
+   which one. Ties between spellings go to the engine listed first on the command line;
+   they used to go to the window's starting engine, which was wav2vec2 in that window
+   (since Whisper had nothing), giving "nik".
+4. **Words only Canary/Voxtral heard** have no timing of their own. They were placed right
+   after the previous word, which put "Dag," in its own cue 6 s too early. Now a run of
+   such words goes just before the next timed word (at most 0.4 s per word), or after the
+   previous one at the end of a window.
+
+Effect: cues starting with a lowercase letter went from 985 to 471, most of them now
+dialogue ("Wil je dit echt? ⏎ vraagt de dierenarts.", correct Dutch) or cuts at a reading
+pause. The vote files grew from 28,323 to 28,685 words (words the one-step vote dropped).
+Still none contain Voxtral's invented sentence.
+
+Scores against the new vote (engines in the order whisper, canary, voxtral, parakeet,
+wav2vec2, vosk):
+
+| engine | WER vs vote | CER vs vote |
+|---|---|---|
+| whisper | 6.8% | 5.3% |
+| canary | 7.0% | 3.4% |
+| voxtral | 25.8% | 26.6% |
+| parakeet | 11.2% | 6.1% |
+| wav2vec2 | 23.8% | 11.3% |
+| vosk | 21.6% | 13.1% |
+
+| series | whisper | canary | voxtral | parakeet | wav2vec2 | vosk |
+|---|---|---|---|---|---|---|
+| balotje | 7.0% | 5.6% | 23.0% | 8.8% | 15.5% | 14.6% |
+| beestje | 23.5% | 6.6% | 65.9% | 17.1% | 35.0% | 39.6% |
+| bentje | 4.1% | 7.3% | 23.0% | 13.8% | 19.0% | 19.8% |
+| eend | 2.5% | 6.8% | 17.2% | 13.0% | 22.8% | 16.9% |
+| help | 8.7% | 8.2% | 32.0% | 15.7% | 23.0% | 11.7% |
+| jake | 4.5% | 8.6% | 28.9% | 13.7% | 29.7% | 19.9% |
+| kerst | 8.3% | 7.9% | 26.7% | 8.9% | 27.2% | 32.8% |
+| lammetje | 11.2% | 4.9% | 33.6% | 5.5% | 19.2% | 23.7% |
+| rinus | 5.4% | 7.6% | 42.6% | 12.7% | 22.5% | 11.5% |
+| sint | 9.3% | 10.3% | 23.2% | 9.6% | 32.3% | 38.4% |
+| tim | 5.2% | 5.7% | 23.8% | 26.5% | 31.1% | 18.3% |
+| vos | 5.8% | 4.3% | 15.6% | 4.3% | 17.8% | 15.5% |
+
+The vote drafts in `work/vote/` are now ready as a starting point for hand-correcting.
+Remaining known imperfections: some cues still break at a reading pause mid-sentence, and
+the majority can be wrong ("oplaasboot").
 
 ## Reproducing
 

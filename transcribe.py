@@ -50,7 +50,8 @@ DEFAULT_MODELS = {
 PROMPT = "Een voorleesverhaal voor kinderen."
 
 # Parakeet, wav2vec2 and Vosk return word timings, not subtitle-sized segments, so we
-# cut cues ourselves: at a pause, or when a cue gets too long to read.
+# cut cues ourselves: at a pause, after the end of a sentence, or when a cue gets too
+# long to read.
 MAX_CUE_WORDS = 14
 MAX_CUE_SECONDS = 7.0
 CUE_PAUSE_SECONDS = 0.8
@@ -91,7 +92,8 @@ def words_to_cues(words: list[Word]) -> list[Cue]:
     current: list[Word] = []
     for word in words:
         if current and (
-            word[0] - current[-1][1] >= CUE_PAUSE_SECONDS
+            current[-1][2].rstrip("\"')»”").endswith((".", "!", "?", "…"))
+            or word[0] - current[-1][1] >= CUE_PAUSE_SECONDS
             or len(current) >= MAX_CUE_WORDS
             or word[1] - current[0][0] > MAX_CUE_SECONDS
         ):

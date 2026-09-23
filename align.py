@@ -19,8 +19,9 @@ How it works:
   4. Within each window, all engines are also aligned together into columns, one per
      word position (ROVER-style progressive alignment). It starts from the engine
      closest to all others in that window and adds the others closest first. Each
-     column is decided by majority vote; a column where most engines have no word is
-     dropped. Ties go to the starting engine.
+     column is decided by majority vote in two steps: a column where more engines have
+     no word than have one is dropped; otherwise the most common word wins. Ties
+     between words go to the engine listed first on the command line.
 
 Output:
   - Printed: per engine, how many of its words are supported by a majority of the other
@@ -32,9 +33,10 @@ Output:
   - With --out: one Markdown file per video: per window the majority-vote text and a
     table of the word positions where engines disagree.
   - With --vote: one .srt per video with the majority-vote transcript, as a starting
-    point for hand-correcting. Spelling and punctuation come from the first engine (in
-    the order given) that has the winning word; timing is the median of the engines
-    with real word timings.
+    point for hand-correcting. Capitals and punctuation are voted on as well, by the
+    engines with the winning word that use capitals or punctuation somewhere in that
+    window (ties: the order given). Timing is the median of the engines with real word
+    timings.
 
 Words are compared lowercased and without punctuation (see normalize in compare.py).
 """
@@ -130,19 +132,23 @@ def matches(a: list[str], b: list[str]) -> list[bool]:
     return hit
 
 
-def vote(column: dict[str, Token | None], first: str) -> str | None:
-    """Majority word of a column (None: most engines have no word here)."""
-    counts = Counter(t.norm if t else None for t in column.values())
-    best = max(counts.values())
-    winners = [w for w, c in counts.items() if c == best]
-    if len(winners) == 1:
-        return winners[0]
-    pivot = column.get(first)
-    return pivot.norm if pivot else None
+def vote(column: dict[str, Token | None], names: list[str]) -> str | None:
+    """Majority word of a column, or None when most engines have no word here.
+
+    Two steps: first whether there is a word at all (engines with any word against
+    engines without; a tie keeps the word), then which word. Voting in one go would
+    let "no word" win whenever the engines that heard something spell it differently.
+    Ties between words go to the engine listed first in `names`.
+    """
+    words = [column[n].norm for n in names if column.get(n)]
+    if len(words) < len(column) - len(words):
+        return None
+    counts = Counter(words)
+    return max(words, key=lambda w: counts[w])
 
 
-def multi_align(tokens: dict[str, list[Token]]) -> tuple[str, list[dict[str, Token | None]]]:
-    """Align all engines of one window into columns. Returns the starting engine too."""
+def multi_align(tokens: dict[str, list[Token]]) -> list[dict[str, Token | None]]:
+    """Align all engines of one window into columns, one per word position."""
     names = list(tokens)
     distance = {n: sum(error_counts(norms(tokens[n]), norms(tokens[o]))[0]
                        for o in names if o != n) for n in names}
@@ -153,7 +159,8 @@ def multi_align(tokens: dict[str, list[Token]]) -> tuple[str, list[dict[str, Tok
     added = [first]
 
     for name in order:
-        consensus = [vote(c, first) or next(t.norm for t in c.values() if t) for c in columns]
+        consensus = [vote(c, names) or next(t.norm for t in c.values() if t)
+                     for c in columns]
         mine = tokens[name]
         if not columns:
             columns = [{name: t} for t in mine]
@@ -177,34 +184,61 @@ def multi_align(tokens: dict[str, list[Token]]) -> tuple[str, list[dict[str, Tok
         for column in columns:
             for n in added:
                 column.setdefault(n, None)
-    return first, columns
+    return columns
 
 
-def voted_tokens(first: str, columns: list[dict[str, Token | None]],
+def voted_tokens(columns: list[dict[str, Token | None]],
                  names: list[str]) -> list[tuple[float | None, float | None, str]]:
     """The majority-vote words of a window, with original spelling and timing."""
+    # Only engines that use capitals or punctuation somewhere in this window vote on
+    # spelling: not wav2vec2 or Vosk, and not Whisper when it writes a stretch of text
+    # without them.
+    formatting = [n for n in names
+                  if any(c.get(n) and c[n].orig != c[n].norm for c in columns)]
     result = []
     for column in columns:
-        winner = vote(column, first)
+        winner = vote(column, names)
         if winner is None:
             continue
         voters = [column[n] for n in names if column.get(n) and column[n].norm == winner]
         timed = [t for t in voters if t.end - t.start <= MAX_WORD_SECONDS]
         start = statistics.median(t.start for t in timed) if timed else None
         end = statistics.median(t.end for t in timed) if timed else None
-        result.append((start, end, voters[0].orig))
+        forms = [column[n].orig for n in formatting
+                 if column.get(n) and column[n].norm == winner]
+        result.append((start, end, most_common(forms) if forms else voters[0].orig))
     return result
 
 
+def most_common(forms: list[str]) -> str:
+    """The most frequent form; ties go to the earliest."""
+    counts = Counter(forms)
+    return max(forms, key=lambda f: counts[f])
+
+
 def fill_times(words, window: tuple[float, float]) -> list[tuple[float, float, str]]:
-    """Give words without timing (only voted for by Canary/Voxtral) a spot in between."""
-    filled, prev_end = [], window[0]
-    for i, (start, end, word) in enumerate(words):
-        if start is None:
-            nxt = next((s for s, _, _ in words[i + 1:] if s is not None), window[1])
-            start, end = prev_end, max(prev_end, min(nxt, prev_end + 0.4))
-        filled.append((start, end, word))
-        prev_end = end
+    """Give words without timing (only voted for by Canary/Voxtral) a spot in between.
+
+    A run of such words goes just before the next word with a timing, at most 0.4 s per
+    word: a word only Canary and Voxtral heard is usually spoken right before the next.
+    At the end of a window, with no timed word after it, the run follows the previous.
+    """
+    filled, prev_end, i = [], window[0], 0
+    while i < len(words):
+        j = i
+        while j < len(words) and words[j][0] is None:
+            j += 1
+        if j > i:
+            nxt = words[j][0] if j < len(words) else window[1]
+            step = min(0.4, max(nxt - prev_end, 0) / (j - i))
+            t = nxt - step * (j - i) if j < len(words) else prev_end
+            for _, _, word in words[i:j]:
+                filled.append((t, t + step, word))
+                t += step
+        if j < len(words):
+            filled.append(words[j])
+            prev_end = words[j][1]
+        i = j + 1
     return filled
 
 
@@ -286,8 +320,8 @@ def main() -> int:
 
             if not any(tokens.values()):
                 continue
-            first, columns = multi_align(tokens)
-            voted = voted_tokens(first, columns, names)
+            columns = multi_align(tokens)
+            voted = voted_tokens(columns, names)
             vote_norms = [w for _, _, word in voted for w in normalize(word)]
             for n in names:
                 e, total = error_counts(vote_norms, norms(tokens[n]))
@@ -305,7 +339,7 @@ def main() -> int:
                           "|" + "---|" * (len(names) + 1)]
                 for c in disagree:
                     cells = [c[n].norm if c.get(n) else "–" for n in names]
-                    lines.append("| " + " | ".join(cells) + f" | {vote(c, first) or '–'} |")
+                    lines.append("| " + " | ".join(cells) + f" | {vote(c, names) or '–'} |")
                 lines.append("")
         if args.out:
             (args.out / f"{video}.md").write_text("\n".join(lines), encoding="utf-8")

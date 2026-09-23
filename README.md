@@ -102,8 +102,8 @@ requiring more than one engine to disagree gives a much shorter list.
     work/wav2vec2 work/vosk --out work/align --vote work/vote
 ```
 
-The vote takes a word's spelling and punctuation from the first engine on the command line
-that has it, so put engines that write capitals and punctuation first.
+Capitals and punctuation in the vote are decided by the engines that write them; ties go
+to the engine listed first, so list the most reliable engines first.
 
 It cuts each video into windows of at most 15 seconds at pauses, puts every engine's
 words into the window they were spoken in, and aligns the engines within each window,
