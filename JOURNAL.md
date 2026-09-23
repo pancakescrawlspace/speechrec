@@ -81,7 +81,9 @@ videos in the same process.
   (worked around by running each video in its own process).
 - Voxtral: stop the invented sentence on music/silence properly, e.g. by skipping pieces
   without speech (voice activity detection) instead of filtering its text afterwards.
-- Try Voxtral Mini 4B Realtime.
+- Voxtral Realtime: run the remaining 36 videos (about 5.6 hours; the 4-bit version
+  `mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit`, 3.1 GB, might be 2–3× faster), and
+  derive real word timings from its token positions.
 - Proper timestamps for Canary via its CTC model (forced alignment).
 - Hand-correct a reference set (René), starting from the vote `.srt` files in `work/vote/`,
   then score all engines against it with `compare.py --reference references`.
@@ -710,6 +712,85 @@ empty, so Voxtral's invented sentences weren't counted). Six engines, all 48 vid
 
 The vote now has 28,656 words (it had 28,688 with plain wav2vec2).
 
+### Voxtral Mini 4B Realtime (`voxtral-rt`)
+`mlx-community/Voxtral-Mini-4B-Realtime-2602-fp16` (Apache-2.0, 8.3 GB in the cache),
+through mlx-audio. The download used Hugging Face's newer "xet" transfer: the blob file
+stays at 0 bytes until the end, while progress shows only in
+`~/.cache/huggingface/xet/logs/`.
+
+How it differs from Voxtral Mini 3B: it is a streaming model that emits one token per
+80 ms of audio (12.5 per second), including the silent stretches, with a fixed delay of
+480 ms. Consequences:
+- A 10-minute video needs about 7,500 tokens, beyond mlx-audio's default limit of 4,096,
+  so it gets the same 15-second pieces as Canary and Voxtral 3B (engine `voxtral-rt`).
+- Since every token belongs to a fixed moment, real word timings could be derived from
+  token positions; mlx-audio's streaming loop only reports text, so that would mean
+  reimplementing about 30 lines of it. Postponed until the quality is known.
+- **It is slow on this Mac**: 98 ms per token, so 20 s for 14 s of audio, slower than
+  real time (about 8 hours for all 48 videos). Voxtral 3B is fast because it only emits
+  the text (about 40 tokens per piece).
+
+First tests on `vos/LeesWijs-bladerboek-33`: the 8–22 s piece was transcribed perfectly
+("Vos en vis. Vos had aardappelpuree gemaakt. Dat bedacht hij zou erg lekker zijn met
+gebakken vis."). **The music intro (0–7.5 s) gave no text at all**, where Voxtral 3B
+invents its "mijnbouwplaats" sentence.
+
+A first full-video test was stopped after 10 minutes to find out why it was slow.
+René chose to run a sample first: the first video of each series (12 videos, 1.4 hours of
+video), in `work/voxtral-rt/`. Evaluation plan: against the vote of the five engines
+without either Voxtral (Whisper, Canary, Parakeet, wav2vec2-lm, Vosk), so the two Voxtrals
+can be compared fairly on the same videos.
+
+### Voxtral Realtime: results on the 12-video sample
+The sample took from 20:47 to about 22:35. Processing speed about 1.3 s per second of
+audio (1.41 for the first video, which includes loading the model and ran partly before
+René disconnected his external display; the display probably mattered only a few percent).
+
+Against the vote of the five engines without either Voxtral (Whisper, Canary, Parakeet,
+wav2vec2-lm, Vosk; this favours those five, since they are part of it):
+
+| whisper | canary | parakeet | wav2vec2-lm | vosk | voxtral | voxtral (cleaned) | voxtral-rt |
+|---|---|---|---|---|---|---|---|
+| 6.2% | 7.0% | 9.8% | 18.2% | 21.3% | 22.3% | 6.7% | 7.7% |
+
+Per video (one per series), same yardstick:
+
+| series | whisper | canary | parakeet | voxtral (cleaned) | voxtral-rt |
+|---|---|---|---|---|---|
+| balotje | 10.8% | 4.9% | 8.7% | 4.6% | 6.5% |
+| beestje | 27.0% | 11.1% | 18.6% | 13.7% | 14.6% |
+| bentje | 2.2% | 6.7% | 13.1% | 6.1% | 7.8% |
+| eend | 2.3% | 5.6% | 11.1% | 6.1% | 5.6% |
+| help | 9.3% | 7.7% | 15.3% | 7.7% | 6.1% |
+| jake | 4.8% | 9.0% | 9.9% | 7.3% | 7.7% |
+| kerst | 7.9% | 9.9% | 7.6% | 8.7% | 10.4% |
+| lammetje | 10.6% | 5.6% | 4.3% | 3.1% | 6.5% |
+| rinus | 7.0% | 4.7% | 5.6% | 6.4% | 7.5% |
+| sint | 6.8% | 9.5% | 9.0% | 9.3% | 12.2% |
+| tim | 5.8% | 4.8% | 26.2% | 8.8% | 7.8% |
+| vos | 1.5% | 5.0% | 3.9% | 4.4% | 4.3% |
+
+With Voxtral Realtime as a full member of the six-engine vote (instead of Voxtral 3B), on
+the same 12 videos, it comes out best:
+
+| engine | ≥ 3 of 5 support | WER vs vote | CER vs vote | wrong words | real word | non-word |
+|---|---|---|---|---|---|---|
+| whisper | 92.1% | 6.8% | 5.2% | 168 | 82.7% | 17.3% |
+| canary | 90.5% | 7.0% | 3.0% | 386 | 74.4% | 25.6% |
+| voxtral-rt | 91.5% | 6.6% | 2.9% | 329 | 74.2% | 25.8% |
+| parakeet | 89.4% | 10.9% | 5.8% | 491 | 75.4% | 24.6% |
+| wav2vec2-lm | 82.4% | 18.7% | 8.3% | 1,103 | 83.7% | 16.3% |
+| vosk | 84.7% | 21.6% | 13.2% | 913 | 98.1% | 1.9% |
+
+Conclusions:
+- **Voxtral Realtime is at least as accurate as Whisper and Canary**, and needs no
+  cleaning: it does not invent text on music or silence. Its most repeated cues are real
+  refrains ("Ik moet op de tegels blijven, zei Tim.", "Vroeg Vos.").
+- Like Canary, it handles the `beestje` openings that Whisper skips (14.6% there against
+  Whisper's 27.0%), and it doesn't have Parakeet's problem with `tim`.
+- Its drawback is speed: slower than real time on this Mac (about 1.3×), so the remaining
+  36 videos (4.3 hours of video) would take about 5.6 hours.
+
 ## Reproducing
 
 Every command used so far, grouped by purpose. Run from the repository root on an Apple
@@ -1203,4 +1284,44 @@ Scoring both wav2vec2 variants against the other five, and the standard run:
 ./venv/bin/python align.py work/whisper work/canary work/voxtral work/parakeet \
     work/wav2vec2-lm work/vosk --out work/align --vote work/vote \
     --lexicon work/test/nl-words.txt > work/align/summary.txt
+```
+
+### Voxtral Mini 4B Realtime
+
+```sh
+./venv/bin/python -c "from huggingface_hub import snapshot_download; \
+    snapshot_download('mlx-community/Voxtral-Mini-4B-Realtime-2602-fp16')"
+
+# one piece, with the model's own timing output (work/test/vos33.wav: the test video's
+# audio, extracted with ffmpeg as in "Test runs on one video")
+./venv/bin/python - <<'PY'
+import soundfile
+from mlx_audio.stt.utils import load
+model = load("mlx-community/Voxtral-Mini-4B-Realtime-2602-fp16")
+audio, rate = soundfile.read("work/test/vos33.wav", dtype="float32")
+print(model.generate(audio[8*rate:22*rate], verbose=True).text)
+print(repr(model.generate(audio[0:int(7.5*rate)]).text))   # the music intro
+PY
+
+# the sample: first video of each series
+for d in videos/*/; do ls "$d"*.mp4 | head -1; done > work/test/rt-sample.txt
+./venv/bin/python transcribe.py --engine voxtral-rt --output-dir work/voxtral-rt \
+    $(cat work/test/rt-sample.txt)
+```
+
+Evaluating the sample (`work/test/vote-no-voxtral`: the vote without either Voxtral;
+`work/test/rt12/<engine>/` holds each engine's `.srt` files for the 12 sample videos, copied
+from `work/`):
+
+```sh
+./venv/bin/python align.py work/whisper work/canary work/parakeet work/wav2vec2-lm work/vosk \
+    --vote work/test/vote-no-voxtral
+./venv/bin/python compare.py work/test/rt12/whisper work/test/rt12/canary \
+    work/test/rt12/parakeet work/test/rt12/wav2vec2-lm work/test/rt12/vosk \
+    work/test/rt12/voxtral work/test/rt12/voxtral-clean work/test/rt12/voxtral-rt \
+    --reference work/test/rt12/ref
+
+# Voxtral Realtime as a full member of the vote (align.py uses the 12 videos all have)
+./venv/bin/python align.py work/whisper work/canary work/voxtral-rt work/parakeet \
+    work/wav2vec2-lm work/vosk --lexicon work/test/nl-words.txt
 ```

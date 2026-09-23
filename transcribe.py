@@ -16,6 +16,7 @@ Engines:
     canary    NVIDIA Canary 1B v2 via mlx-audio; no timestamps of its own, so cue
               timing is approximate (see split_at_pauses)
     voxtral   Mistral Voxtral Mini 3B via mlx-audio; no timestamps either
+    voxtral-rt  Mistral Voxtral Mini 4B Realtime via mlx-audio, on the same pieces
 
 The .srt is written next to each video with the same basename, unless
 --output-dir is given. Engines other than whisper add their name to the file
@@ -46,6 +47,7 @@ DEFAULT_MODELS = {
     "vosk": "vosk-model-nl-spraakherkenning-0.6",
     "canary": "CogniSoftOrg/canary-1b-v2-mlx-bf16",
     "voxtral": "mlx-community/Voxtral-Mini-3B-2507-bf16",
+    "voxtral-rt": "mlx-community/Voxtral-Mini-4B-Realtime-2602-fp16",
 }
 
 # Whisper's built-in prompt nudges spelling/style; a short Dutch sentence helps
@@ -308,6 +310,23 @@ def run_voxtral(wav: Path, model: str, language: str,
     return cues, words
 
 
+def run_voxtral_rt(wav: Path, model: str, language: str,
+                   prompt: str) -> tuple[list[Cue], list[Word]]:
+    import soundfile
+
+    # A streaming model: it detects the language itself and takes no prompt. It could
+    # take a whole video, but emits one token per 80 ms of audio (7,500 for a 10-minute
+    # video, beyond its default limit of 4,096), and gives no word timings; so it gets
+    # the same pieces as Canary and Voxtral.
+    audio, rate = soundfile.read(wav, dtype="float32")
+    cues, words = [], []
+    for a, b in split_at_pauses(audio, rate):
+        text = load_mlx_audio(model).generate(audio[a:b]).text
+        cues += text_to_cues(text, a / rate, b / rate)
+        words += [(a / rate, b / rate, w) for w in text.split()]
+    return cues, words
+
+
 ENGINES = {
     "whisper": run_whisper,
     "parakeet": run_parakeet,
@@ -316,6 +335,7 @@ ENGINES = {
     "vosk": run_vosk,
     "canary": run_canary,
     "voxtral": run_voxtral,
+    "voxtral-rt": run_voxtral_rt,
 }
 
 

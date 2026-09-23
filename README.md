@@ -3,7 +3,7 @@
 A proof of concept for generating subtitles for our company's video files automatically.
 It runs speech recognition locally on Apple Silicon, so no audio leaves the machine.
 
-`transcribe.py` writes an `.srt` subtitle file for each input video, using one of seven
+`transcribe.py` writes an `.srt` subtitle file for each input video, using one of eight
 engines:
 
 | Engine | Model | Notes |
@@ -14,6 +14,7 @@ engines:
 | `wav2vec2-lm` | The same model, decoded with its own Dutch 5-gram language model, via pyctcdecode and kenlm | Fewer garbled words, but its mistakes are more often real (wrong) words. Needs an extra setup step, see below. Slower. |
 | `canary` | NVIDIA Canary 1B v2 ([MLX conversion](https://huggingface.co/CogniSoftOrg/canary-1b-v2-mlx-bf16)), via [mlx-audio](https://github.com/Blaizzy/mlx-audio) | Multilingual (25 European languages). Capitals and punctuation. No timestamps of its own, so cue timing is approximate. |
 | `voxtral` | Mistral Voxtral Mini 3B ([MLX conversion](https://huggingface.co/mlx-community/Voxtral-Mini-3B-2507-bf16)), via mlx-audio | Multilingual. Capitals and punctuation. No timestamps of its own. Can invent text during music or silence. About 5× slower than the others. |
+| `voxtral-rt` | Mistral Voxtral Mini 4B Realtime ([MLX conversion](https://huggingface.co/mlx-community/Voxtral-Mini-4B-Realtime-2602-fp16)), via mlx-audio | Multilingual. Capitals and punctuation. No timestamps of its own. Doesn't invent text on music. Among the most accurate, but slower than real time on the Mac used here. |
 | `vosk` | [Vosk](https://alphacephei.com/vosk/) with `vosk-model-nl-spraakherkenning-0.6` (the [Kaldi_NL](https://github.com/opensource-spraakherkenning-nl/Kaldi_NL) model) | Dutch only, runs on the CPU. Lowercase, no punctuation. |
 
 `compare.py` compares the output of these engines with each other and, once they exist,
@@ -75,10 +76,10 @@ Options:
 
 | Option | Default | Purpose |
 |---|---|---|
-| `--engine NAME` | `whisper` | `whisper`, `parakeet`, `wav2vec2`, `wav2vec2-lm`, `vosk`, `canary` or `voxtral`. |
+| `--engine NAME` | `whisper` | `whisper`, `parakeet`, `wav2vec2`, `wav2vec2-lm`, `vosk`, `canary`, `voxtral` or `voxtral-rt`. |
 | `--output-dir DIR` | next to each video | Write the `.srt` files to this folder instead (created if missing). |
 | `--model NAME` | per engine, see `DEFAULT_MODELS` | Another model for the chosen engine: a Hugging Face repo, or for Vosk a model name in `~/.cache/vosk`. |
-| `--language CODE` | `nl` | Whisper, Canary and Voxtral only. ISO 639-1 language code. |
+| `--language CODE` | `nl` | Whisper, Canary and Voxtral (not Voxtral Realtime) only. ISO 639-1 language code. |
 | `--prompt TEXT` | `"Een voorleesverhaal voor kinderen."` | Whisper only. Short description of the material; steers spelling and style. Pass `''` for no prompt. |
 
 Whisper writes `video.srt`. The other engines add their name (`video.parakeet.srt`), so
@@ -171,7 +172,7 @@ Parakeet, wav2vec2(-lm) and Vosk return timings per word instead of per segment.
 those words into cues itself: a new cue starts after a pause of 0.8 seconds, after 14
 words, or when a cue would last longer than 7 seconds.
 
-Canary and Voxtral return no timings at all. The script cuts the audio into pieces of at most 15
+Canary and both Voxtrals return no timings at all. The script cuts the audio into pieces of at most 15
 seconds at the quietest moment, transcribes each piece, and shares the piece's time out
 over its sentences by text length.
 
