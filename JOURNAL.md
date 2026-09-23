@@ -73,8 +73,12 @@ videos in the same process.
 
 - Delete `venv-py311/` (the old Python 3.11 environment, kept as a fallback after the
   upgrade to 3.13) once the new environment has proven itself.
-- Make Whisper reproducible (fixed seed, or no temperature fallback).
-- Find out why Vosk's output depends on the preceding videos in a run.
+- Whisper robustness: it sometimes skips a whole passage (the `beestje` openings, a 20 s
+  passage in `vos/LeesWijs-bladerboek-35` depending on the random draw). Idea: let Whisper
+  transcribe the same short pieces as Canary, so one bad 30 s window can't swallow a
+  passage, and compare against the vote.
+- Optional: find out *why* Whisper and Vosk depend on earlier videos in the same process
+  (worked around by running each video in its own process).
 - Voxtral: stop the invented sentence on music/silence properly, e.g. by skipping pieces
   without speech (voice activity detection) instead of filtering its text afterwards.
 - Try Voxtral Mini 4B Realtime.
@@ -255,7 +259,8 @@ in the same `transcribe.py` call, the result differs: 24 to 132 changed lines in
 of the `.srt` files (about 110 cues, so 440 lines), in both text and timing. Loading a fresh Vosk model per video did not help, so the state is kept somewhere
 inside the Vosk library. Not investigated further.
 
-Workaround for reproducible Vosk output: run one process per video:
+Workaround for reproducible Vosk output: run one process per video (later built into
+`transcribe.py`, see "Reproducible Whisper (and Vosk)"):
 
 ```sh
 for f in videos/*/*.mp4; do
@@ -581,6 +586,43 @@ instead of the python.org 3.11.6.
 - `requirements.txt` changes: numpy 2.3.5 → 2.4.6, plus `setuptools` and replacements for
   standard modules Python 3.13 removed (`audioop-lts`, `standard-aifc`, `standard-chunk`,
   `standard-sunau`), pulled in by the audio libraries. It now needs Python 3.13.
+
+### Reproducible Whisper (and Vosk)
+Whisper decodes greedily first, but when a stretch looks poor (too repetitive, or low
+confidence) it retries at higher "temperatures", sampling words at random with an
+unseeded generator (`mlx_whisper.transcribe`'s default `temperature=(0.0, 0.2, …, 1.0)`).
+Two ways to make it reproducible were tested with `work/test/whisper_variants.py`:
+
+- **Greedy only** (`temperature=0`): fully reproducible, alone and after another video.
+  Same result as the default in 43 of 48 videos, but in 3 it loses text. In
+  `vos/LeesWijs-bladerboek-35` it dropped a 20-second passage of seven sentences
+  (3:26–3:48) and put an invented sentence in its place ("De volgende keer was het.").
+  Against the vote of the other five engines: 9.6% WER, the default 9.1–9.2%. Rejected.
+- **Retries kept, fixed seed** (`mx.random.seed(0)` before each video): reproducible for
+  a single video (three runs byte-identical), but after another video in the same process
+  the output still differs. So Whisper, like Vosk, carries some state from one video to
+  the next, besides the randomness.
+
+What was chosen, in `transcribe.py`: a fixed seed (`WHISPER_SEED`), and for Whisper and
+Vosk (`ISOLATE_ENGINES`) a separate process per video when given several videos. The
+Vosk loop in the shell from before is no longer needed.
+
+Checks:
+- Whisper on `vos/LeesWijs-bladerboek-33` alone and after `…-34`: byte-identical. Vosk the
+  same way: identical to the existing per-process output in `work/vosk`.
+- Seeded Whisper twice on all 48 videos: **all 96 files byte-identical** (`.srt` and
+  `.words.json`). 574 s per run (545 s before; the extra processes cost about 30 s).
+- Against the vote of the other five engines: 9.2% WER, the same as the default runs
+  (9.1%, 9.2%). Reproducibility costs no accuracy.
+
+Important finding along the way: **whether Whisper skips a passage is partly luck.** With
+seed 0 it also loses the passage in video 35, like greedy; the earlier default run got it
+by a lucky draw that shifted Whisper's 30-second windows. A fixed seed makes the luck
+repeatable, not better. Robustness is a separate problem (see TODO).
+
+The seeded output is now the standard `work/whisper/`; the previous one is in
+`work/run2/whisper/`. The vote was regenerated; the scores against it are unchanged
+(Whisper 6.8% WER, 5.3% CER; 28,688 words in the vote files).
 
 ## Reproducing
 
@@ -945,3 +987,52 @@ The Whisper checks: two more single runs of the test video (`--output-dir
 work/test/whisper-single2`) and one after another video in the same call
 (`videos/vos/LeesWijs-bladerboek-34.mp4 videos/vos/LeesWijs-bladerboek-33.mp4`), compared by
 word with `compare.error_counts`.
+
+### Reproducible Whisper
+
+`work/test/whisper_variants.py` (not in git) runs Whisper with `default`, `seed` or
+`greedy` decoding on videos in one process: it calls `transcribe.run_whisper` with
+`mlx_whisper.transcribe` wrapped to set `mx.random.seed(0)` first (seed) or pass
+`temperature=0.0` (greedy).
+
+```sh
+V=videos/vos/LeesWijs-bladerboek-33.mp4; W=videos/vos/LeesWijs-bladerboek-34.mp4
+for variant in seed greedy; do
+  for run in 1 2; do
+    ./venv/bin/python work/test/whisper_variants.py $variant work/test/wv/$variant-single$run $V
+  done
+  ./venv/bin/python work/test/whisper_variants.py $variant work/test/wv/$variant-after34 $W $V
+done
+./venv/bin/python work/test/whisper_variants.py greedy work/test/wv/greedy videos/*/*.mp4
+
+# the vote of the other five engines as a yardstick
+./venv/bin/python align.py work/canary work/voxtral work/parakeet work/wav2vec2 work/vosk \
+    --vote work/test/vote5
+./venv/bin/python compare.py work/test/wv/default-run1 work/test/wv/default-run2 \
+    work/test/wv/greedy work/test/wv/seeded --reference work/test/vote5
+```
+
+(`default-run1` and `default-run2` are copies of the Whisper `.srt` files from `work/run1`
+and from the rerun with word timings; `seeded` is a copy of `whisper-seeded-1`.)
+
+With the fix in `transcribe.py`: alone against in a batch, then twice on everything:
+
+```sh
+./venv/bin/python transcribe.py --output-dir work/test/iso/single $V
+./venv/bin/python transcribe.py --output-dir work/test/iso/batch $W $V
+cmp work/test/iso/single/LeesWijs-bladerboek-33.srt work/test/iso/batch/LeesWijs-bladerboek-33.srt
+
+for i in 1 2; do
+  ./venv/bin/python transcribe.py --output-dir work/test/whisper-seeded-$i videos/*/*.mp4
+done
+n=0
+for f in work/test/whisper-seeded-1/*; do
+  cmp -s "$f" "work/test/whisper-seeded-2/$(basename $f)" || n=$((n+1))
+done
+echo "$n files differ"
+
+mkdir -p work/run2 && mv work/whisper work/run2/whisper
+cp -R work/test/whisper-seeded-1 work/whisper
+./venv/bin/python align.py work/whisper work/canary work/voxtral work/parakeet \
+    work/wav2vec2 work/vosk --out work/align --vote work/vote > work/align/summary.txt
+```

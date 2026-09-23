@@ -49,6 +49,15 @@ DEFAULT_MODELS = {
 # it commit to Dutch orthography from the start.
 PROMPT = "Een voorleesverhaal voor kinderen."
 
+# When a stretch decodes poorly, Whisper retries it with random sampling. A fixed
+# seed makes those retries, and so the output, the same on every run.
+WHISPER_SEED = 0
+
+# Whisper and Vosk give different output for a video depending on which videos were
+# transcribed before it in the same process. With several videos, each one gets a
+# process of its own, so the output is the same alone or in a batch.
+ISOLATE_ENGINES = {"whisper", "vosk"}
+
 # Parakeet, wav2vec2 and Vosk return word timings, not subtitle-sized segments, so we
 # cut cues ourselves: at a pause, after the end of a sentence, or when a cue gets too
 # long to read.
@@ -147,7 +156,10 @@ def text_to_cues(text: str, start: float, end: float) -> list[Cue]:
 
 def run_whisper(wav: Path, model: str, language: str,
                 prompt: str) -> tuple[list[Cue], list[Word]]:
+    import mlx.core as mx
     import mlx_whisper
+
+    mx.random.seed(WHISPER_SEED)
 
     result = mlx_whisper.transcribe(
         str(wav),
@@ -348,11 +360,18 @@ def main() -> int:
     if args.output_dir:
         args.output_dir.mkdir(parents=True, exist_ok=True)
 
+    isolate = args.engine in ISOLATE_ENGINES and len(args.videos) > 1
     for video in args.videos:
         if not video.exists():
             print(f"skip (not found): {video}", file=sys.stderr)
-            continue
-        transcribe(video, args.engine, model, args.language, args.prompt, args.output_dir)
+        elif isolate:
+            command = [sys.executable, __file__, str(video), "--engine", args.engine,
+                       "--model", model, "--language", args.language, "--prompt", args.prompt]
+            if args.output_dir:
+                command += ["--output-dir", str(args.output_dir)]
+            subprocess.run(command, check=True)
+        else:
+            transcribe(video, args.engine, model, args.language, args.prompt, args.output_dir)
     return 0
 
 

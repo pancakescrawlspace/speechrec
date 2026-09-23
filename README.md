@@ -68,6 +68,10 @@ Whisper writes `video.srt`. The other engines add their name (`video.parakeet.sr
 they never overwrite the Whisper subtitles. The script skips files it cannot find and
 continues with the rest.
 
+The output is reproducible: the same video gives the same subtitles every time, alone or
+in a batch. Whisper uses a fixed random seed, and Whisper and Vosk process each video in a
+separate process, because otherwise earlier videos in the same run affect the result.
+
 To run all engines on all videos, one output folder per engine:
 
 ```sh
@@ -158,7 +162,8 @@ This is a proof of concept, so:
 - wav2vec2 runs without its optional language model (that needs the `kenlm` and
   `pyctcdecode` packages), which makes it less accurate than it could be.
 - There are no hand-corrected references yet, so no engine has an accuracy score.
-- Whisper and Vosk don't always give the same output for the same video. See JOURNAL.md.
+- Whisper sometimes skips a passage (for example a sung opening); a fixed random seed
+  makes this repeatable, not rarer. See JOURNAL.md.
 - There are no tests.
 
 ## Repository notes
