@@ -2,6 +2,72 @@
 
 A running record of decisions and results for this project, newest entries at the bottom.
 
+## Next step: systematic comparison of the engines
+
+Status: **started 2026-09-23**, see the dated entries at the bottom for progress. This
+section describes the whole plan, so that a new session can pick it up.
+
+### Where things stand
+- Six engines (`transcribe.py --engine whisper|parakeet|wav2vec2|vosk|canary|voxtral`) have
+  transcribed all 48 videos (`videos/<series>/*.mp4`, 5.7 hours) into `work/<engine>/*.srt`
+  (git-ignored, copyrighted). How: see "Reproducing".
+- `compare.py` currently joins all words of a video into one list per engine (lowercased,
+  punctuation removed), aligns engines pairwise over the whole video with `jiwer`'s
+  word-level edit distance, and reports WER. Review sheets align every engine to Whisper
+  (the "pivot") and flag Whisper cues that another engine disagrees with.
+- No hand-corrected references exist yet; René will make them later. Until then all numbers
+  are agreement between engines, not accuracy.
+
+### Why a new approach
+Whole-file alignment is fine for a *score*: the edit-distance count is optimal even when
+several alignments are equally good. It falls short for *showing which words differ*:
+- Repeated text (refrains in the rhyming books): if an engine skips one of two identical
+  lines, the alignment can pin the gap on the wrong one.
+- Invented text (Voxtral's repeated "voormalige mijnbouwplaats" sentence, see the Voxtral
+  entries) gets aligned against real words nearby.
+- Pivot bias: aligning everything to Whisper gives the others nothing to line up with where
+  Whisper itself fails (e.g. the skipped `beestje` openings).
+Normalization is a separate weak point: "daarnet"/"daar net" counts as two errors,
+spelling variants ("Mick"/"Mik"), digits versus words.
+
+### The plan (in this order)
+1. **Keep word timestamps.** `transcribe.py` writes, next to each `.srt`, a
+   `<video>[.<engine>].words.json`: a list of `{"start", "end", "word"}` in seconds. Whisper
+   needs `word_timestamps=True` in `mlx_whisper.transcribe` (its segment timings are coarse).
+   Parakeet (`AlignedToken`s, merged into words), wav2vec2 (pipeline word chunks) and Vosk
+   already produce word timings internally. Canary and Voxtral have none: give their words
+   the start/end of the 15-second piece they came from. Then rerun Whisper, Parakeet,
+   wav2vec2 and Vosk on all videos (about 25 minutes; run Vosk one process per video, see
+   "Reproducibility checks"), and Canary/Voxtral if their pieces aren't recoverable (Voxtral
+   takes 41 minutes).
+2. **Common time windows.** Cut each video into windows of at most about 15 s with
+   `split_at_pauses` from `transcribe.py` (the same windows Canary and Voxtral use, since
+   the function is deterministic). Put every engine's words into windows by the midpoint of
+   their timestamp. Words in different windows are never aligned with each other.
+3. **All-pairs support counts, no pivot.** Within each window, align every pair of engines
+   (15 pairs for 6 engines). For each word of each engine, count how many other engines
+   match it exactly in their pairwise alignment (0–5). This gives every engine a
+   per-word confidence map; low-support words are the ones to check.
+4. **Multiple alignment for a side-by-side table.** Pairwise alignments don't have to be
+   consistent with each other, so for one table with a column per word position use a
+   ROVER-style progressive alignment (ROVER: NIST's "Recognizer Output Voting Error
+   Reduction"): per window, start with the engine with the smallest total distance to all
+   others ("centre star"), then add the other engines one by one, closest first, aligning
+   each to the combined result. Output per video: a Markdown table per window (rows =
+   engines, columns = aligned word positions) and a **majority-vote transcript** as an
+   `.srt` with the window timings, as a starting point for René's hand corrections.
+5. **Checks.** Compare the whole-file WER with the sum over windows; a big difference means
+   words land in the wrong window. Add a character error rate (CER) next to WER, which is
+   less sensitive to compound splitting. Report per series (the `beestje` and `tim` series
+   behave very differently from `vos`).
+
+Where to put it: a new script (e.g. `align.py`) or new options in `compare.py`, reusing
+`read_srt`, `normalize` and `error_counts`. Document every command in "Reproducing".
+
+Known pitfalls: Voxtral's invented sentence (filter it or treat it as a known
+hallucination), Whisper is not deterministic between runs, Vosk output depends on earlier
+videos in the same process.
+
 ## TODO
 
 - **Upgrade Python** from the python.org 3.11 install to a newer version (MacPorts has 3.13
