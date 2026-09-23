@@ -37,6 +37,14 @@ with an ISO 639-1 code:
 ./venv/bin/python transcribe.py --language en path/to/video.mp4
 ```
 
+Other options:
+
+| Option | Default | Purpose |
+|---|---|---|
+| `--prompt TEXT` | `"Een voorleesverhaal voor kinderen."` | Short description of the material; steers spelling and style. Pass `''` for no prompt. |
+| `--model REPO` | `mlx-community/whisper-large-v3-turbo` | Hugging Face repo of any MLX Whisper model. |
+| `--output-dir DIR` | next to each video | Write the `.srt` files to this folder instead (created if missing). |
+
 The script skips files it cannot find and continues with the rest.
 
 ## How it works
@@ -44,8 +52,8 @@ The script skips files it cannot find and continues with the rest.
 1. ffmpeg extracts the audio track as 16 kHz mono WAV, the format Whisper expects.
 2. Whisper transcribes the audio. Two settings help with quality:
    - A short Dutch initial prompt ("Een voorleesverhaal voor kinderen.") steers the
-     model toward Dutch spelling from the first segment. This prompt is tuned for
-     read-aloud children's stories, so change it in `transcribe.py` if your material
+     model toward Dutch spelling from the first segment. This default prompt is tuned for
+     read-aloud children's stories, so pass `--prompt` if your material
      is different.
    - `condition_on_previous_text=False` stops the model from repeating the same line
      over and over.
@@ -58,7 +66,7 @@ The script skips files it cannot find and continues with the rest.
 This is a proof of concept, so:
 
 - It only runs on Apple Silicon.
-- The model, prompt and filtering are hard-coded in `transcribe.py`.
+- The cue filtering and decoding settings are hard-coded in `transcribe.py`.
 - The generated subtitles have not been checked against a quality benchmark. Review
   them before publishing.
 - There are no tests.
