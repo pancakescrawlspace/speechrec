@@ -2,6 +2,7 @@ annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.15.1
 attrs==26.1.0
+audioop-lts==0.2.2
 audioread==3.1.0
 certifi==2026.7.22
 cffi==2.1.1
@@ -41,7 +42,7 @@ msgpack==1.2.2
 narwhals==2.26.0
 networkx==3.6.1
 numba==0.67.0
-numpy==2.3.5
+numpy==2.4.6
 packaging==26.3
 parakeet-mlx==0.5.2
 pillow==12.3.0
@@ -64,11 +65,15 @@ safetensors==0.8.0
 scikit-learn==1.9.1
 scipy==1.17.1
 sentencepiece==0.2.2
+setuptools==84.0.0
 shellingham==1.5.4
 sounddevice==0.5.6
 soundfile==0.14.0
 soxr==1.1.0
 srt==3.5.3
+standard-aifc==3.13.0
+standard-chunk==3.13.0
+standard-sunau==3.13.0
 sympy==1.14.0
 threadpoolctl==3.7.0
 tiktoken==0.14.0

@@ -71,14 +71,8 @@ videos in the same process.
 
 ## TODO
 
-- **Upgrade Python** from the python.org 3.11 install to a newer version (MacPorts has 3.13
-  and 3.14 in `/opt/local/bin`). René wants this anyway, to do at a suitable moment after
-  the current engine comparison. Steps: recreate `venv` with the new Python, change
-  `numpy==2.3.5` back to `2.4.6` in `requirements.txt` (the numpy cap from
-  `mistral-common` only applies to Python ≤ 3.12), reinstall, then rerun the engines on the
-  test video to check the output is unchanged. First check that every pinned package has a
-  wheel for the new version. Probably also fixes the root certificate problem that broke
-  Vosk's own model download.
+- Delete `venv-py311/` (the old Python 3.11 environment, kept as a fallback after the
+  upgrade to 3.13) once the new environment has proven itself.
 - Make Whisper reproducible (fixed seed, or no temperature fallback).
 - Find out why Vosk's output depends on the preceding videos in a run.
 - Voxtral: stop the invented sentence on music/silence properly, e.g. by skipping pieces
@@ -563,6 +557,31 @@ The vote drafts in `work/vote/` are now ready as a starting point for hand-corre
 Remaining known imperfections: some cues still break at a reading pause mid-sentence, and
 the majority can be wrong ("oplaasboot").
 
+### Python upgrade: 3.11 → 3.13
+Done as planned in the TODO list. MacPorts' Python 3.13.15 (`/opt/local/bin/python3.13`)
+instead of the python.org 3.11.6.
+- 3.14 was not tried: a check showed at least one pinned package is only published for
+  Python below 3.14.
+- A test environment in `work/test/venv313` installed `requirements.txt` with numpy back at
+  2.4.6 without problems (`pip check`: no broken requirements). The numpy cap from
+  `mistral-common` only applies to Python ≤ 3.12.
+- **Root certificates work** with the MacPorts Python, so Vosk's own model download would
+  work there (tested with a request to alphacephei.com).
+- All six engines on `vos/LeesWijs-bladerboek-33` under 3.13: Parakeet, wav2vec2, Vosk,
+  Canary and Voxtral byte-identical to the 3.11 outputs in `work/`.
+- Whisper differed, which led to a check whether Whisper, like Vosk, depends on earlier
+  videos in the same run rather than being random. Two single runs happened to give
+  identical words, but a third single run gave 15 different words and a different number
+  of cues (134 instead of 112), while a run after another video matched the first. So
+  Whisper really does vary at random between runs, as noted before; not an order effect.
+- The old environment was renamed to `venv-py311/` as a fallback (still runs; git-ignored
+  via `venv-*/`), and a fresh `venv/` was created with 3.13 (a venv can't simply be moved,
+  its scripts contain their own path). In the new `venv`: Parakeet and Canary identical
+  again, and `compare.py` and `align.py` give the same results.
+- `requirements.txt` changes: numpy 2.3.5 → 2.4.6, plus `setuptools` and replacements for
+  standard modules Python 3.13 removed (`audioop-lts`, `standard-aifc`, `standard-chunk`,
+  `standard-sunau`), pulled in by the audio libraries. It now needs Python 3.13.
+
 ## Reproducing
 
 Every command used so far, grouped by purpose. Run from the repository root on an Apple
@@ -572,10 +591,10 @@ folder are shown with `work/test/` instead.
 
 ### Setup
 
-To recreate the environment:
+To recreate the environment (Python 3.13; MacPorts puts it in `/opt/local/bin`):
 
 ```sh
-python3 -m venv venv
+python3.13 -m venv venv
 ./venv/bin/pip install -r requirements.txt
 ```
 
@@ -891,3 +910,38 @@ done
 
 For the one-video test, the six `.words.json` files were first copied into one folder per
 engine under `work/test/wordsets/`.
+
+### Python upgrade
+
+```sh
+# certificates and version of the new Python
+/opt/local/bin/python3.13 --version
+/opt/local/bin/python3.13 -c "import urllib.request; urllib.request.urlopen('https://alphacephei.com/vosk/models/model-list.json'); print('certificates OK')"
+
+# test environment with numpy back at 2.4.6
+sed 's/^numpy==2.3.5$/numpy==2.4.6/' requirements.txt > work/test/req-new.txt
+/opt/local/bin/python3.13 -m venv work/test/venv313
+work/test/venv313/bin/pip install --upgrade pip
+work/test/venv313/bin/pip install -r work/test/req-new.txt
+work/test/venv313/bin/pip check
+
+# every engine on the test video, compared with the 3.11 output
+for e in whisper parakeet wav2vec2 vosk canary voxtral; do
+  work/test/venv313/bin/python transcribe.py --engine $e --output-dir work/test/py313/$e \
+      videos/vos/LeesWijs-bladerboek-33.mp4
+  n=LeesWijs-bladerboek-33; [ $e = whisper ] && f=$n.srt || f=$n.$e.srt
+  cmp -s work/test/py313/$e/$f work/$e/$f && echo "$e identical" || echo "$e differs"
+done
+
+# the switch
+mv venv venv-py311
+/opt/local/bin/python3.13 -m venv venv
+./venv/bin/pip install --upgrade pip
+./venv/bin/pip install -r work/test/req-new.txt
+./venv/bin/pip freeze > requirements.txt
+```
+
+The Whisper checks: two more single runs of the test video (`--output-dir
+work/test/whisper-single2`) and one after another video in the same call
+(`videos/vos/LeesWijs-bladerboek-34.mp4 videos/vos/LeesWijs-bladerboek-33.mp4`), compared by
+word with `compare.error_counts`.

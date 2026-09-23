@@ -23,13 +23,14 @@ results so far.
 ## Requirements
 
 - A Mac with Apple Silicon (M1 or later). MLX does not run on Intel Macs or other platforms.
-- Python 3
+- Python 3.13 (for example from MacPorts or Homebrew). `requirements.txt` is pinned for
+  3.13; it includes replacements for standard modules that 3.13 removed.
 - [ffmpeg](https://ffmpeg.org/) on your `PATH` (for example `brew install ffmpeg`)
 
 ## Setup
 
 ```sh
-python3 -m venv venv
+python3.13 -m venv venv
 ./venv/bin/pip install -r requirements.txt
 ```
 
