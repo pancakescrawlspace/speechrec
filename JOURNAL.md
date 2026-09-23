@@ -4,8 +4,9 @@ A running record of decisions and results for this project, newest entries at th
 
 ## Next step: systematic comparison of the engines
 
-Status: **started 2026-09-23**, see the dated entries at the bottom for progress. This
-section describes the whole plan, so that a new session can pick it up.
+Status: **done 2026-09-23** (all five steps, run on all 48 videos; results in
+"Systematic comparison: results on all 48 videos" below). This section describes the
+plan as it was carried out.
 
 ### Where things stand
 - Six engines (`transcribe.py --engine whisper|parakeet|wav2vec2|vosk|canary|voxtral`) have
@@ -85,7 +86,9 @@ videos in the same process.
 - Try Voxtral Mini 4B Realtime.
 - Proper timestamps for Canary via its CTC model (forced alignment).
 - wav2vec2 with its language model (`kenlm`, `pyctcdecode`).
-- Hand-correct a reference set (René), then score all engines against it.
+- Vote `.srt`: cut cues at sentence ends too, so fewer cues start mid-sentence.
+- Hand-correct a reference set (René), starting from the vote `.srt` files in `work/vote/`,
+  then score all engines against it with `compare.py --reference references`.
 
 ## 2026-09-23
 
@@ -340,6 +343,163 @@ Summary so far, without references: Canary and cleaned Voxtral agree best with t
 Whisper is close behind but skips sung/rhymed openings, Parakeet is a bit further off,
 and Vosk and wav2vec2 are clearly weaker. Agreement is not accuracy; the hand-corrected
 references will decide.
+
+### Systematic comparison, step 1: word timestamps
+`transcribe.py` now writes a `.words.json` next to every `.srt`: a list of
+`{"start", "end", "word"}` (seconds, original spelling and punctuation).
+- Whisper: `word_timestamps=True`. Its word timings are far more precise than its segment
+  timings (first word "Vos" at 8.32 s, while the first segment started at 0:00).
+- Parakeet: its tokens are word pieces; a piece starting with a space starts a new word.
+- wav2vec2 and Vosk: their word timings were already used for the cues.
+- Canary and Voxtral: every word gets the start and end of its 15-second piece.
+Test on `vos/LeesWijs-bladerboek-33`: the four engines with real word timings agree within
+a few tenths of a second (first word 8.3–8.9 s). Canary's and Voxtral's `.srt` output was
+byte-identical to the full run, so unlike Whisper and Vosk they are deterministic.
+With `word_timestamps=True` Whisper made 134 cues instead of 127 for this video.
+
+The first run's outputs, which all tables above are based on, were copied to `work/run1/`
+before rerunning all engines with word timings (`work/run_words.sh`, see "Reproducing").
+
+### Systematic comparison, steps 2 and 3: windows and all-pairs support
+New script `align.py`: cuts each video into the same ≤ 15 s windows as `split_at_pauses`,
+puts every engine's words into windows by the midpoint of their timing, aligns every pair
+of engines within each window, and counts per word how many other engines have exactly
+that word there ("support"). It prints the share of each engine's words supported by a
+majority of the others and by none, plus per-window against whole-file WER per pair. With
+`--out` it writes a Markdown file per video: every window with each engine's text, words
+supported by at most one other engine in bold with their count.
+
+Bug found in testing: sorting words on (start, end, word) put Canary's and Voxtral's words
+in alphabetical order within a window, since they all share their piece's timing. Now
+sorted on start time only (stable sort keeps the spoken order).
+
+Test on `vos/LeesWijs-bladerboek-33` (59 windows):
+
+| engine | words | supported by ≥ 3 of 5 | supported by none |
+|---|---|---|---|
+| whisper | 1019 | 95.7% | 1.5% |
+| parakeet | 1016 | 94.6% | 2.1% |
+| wav2vec2 | 1013 | 84.6% | 13.3% |
+| vosk | 972 | 88.6% | 9.7% |
+| canary | 1018 | 94.6% | 2.8% |
+| voxtral | 1103 | 88.3% | 9.1% |
+
+Per-window and whole-file WER differ by at most about 1 percentage point per pair (for
+example Whisper/Canary 6.8% against 6.4%), so the midpoint rule rarely puts words in the
+wrong window. Voxtral's invented sentence shows up as its own window full of
+zero-support words during the music intro (00:00–00:07). Example of a split decision:
+"gedachten" (Whisper, Parakeet) against "gedachte" (Vosk, Canary, Voxtral).
+
+Remaining: run `align.py` on all 48 videos once the rerun with word timings is done, then
+step 4 (ROVER-style multiple alignment and majority-vote transcript) and the rest of step 5
+(CER, results per series).
+
+### Systematic comparison, step 4: multiple alignment and majority vote
+`align.py` now also aligns all engines of a window together into columns (one per word
+position), ROVER-style: it starts with the engine closest to all others in that window
+(the "centre star"), then adds the others closest first, each aligned to the majority
+vote of the columns so far. Each column is decided by majority vote; if most engines
+have no word there, the column is dropped; ties go to the starting engine. New outputs:
+- per window in the Markdown files: the voted text and a table of only the positions
+  where the engines disagree;
+- with `--vote DIR`: a majority-vote `.srt` per video, as a starting point for
+  hand-correcting. The winning word keeps the spelling and punctuation of the first engine
+  (in command-line order) that has it; its timing is the median of the engines with real
+  word timings (words spanning more than 3 s, i.e. Canary/Voxtral piece timings, are not
+  used); cues are made with the same rules as for Parakeet/wav2vec2/Vosk;
+- printed: each engine's WER against the vote.
+
+Test on `vos/LeesWijs-bladerboek-33`, WER against the majority vote: Whisper 3.2%,
+Parakeet 4.3%, Canary 4.8%, Voxtral 11.2%, Vosk 15.8%, wav2vec2 17.9%. Voxtral's invented
+sentence in the intro is voted away (only Voxtral has it). The vote `.srt` has proper start
+times (first cue at 8.685 s, where Whisper's own `.srt` starts at 0:00) and keeps Whisper's
+capitals and punctuation.
+
+Limitations seen in the test:
+- **The majority can be wrong.** "oplaasboot" (Parakeet, Canary, Voxtral) beats
+  "opblaasboot" (Whisper, Vosk), though "opblaasboot" is the real word. The vote is a draft
+  to correct, not a reference.
+- When the winning spelling comes from an engine without punctuation, the punctuation is
+  lost ("gedachte" from Vosk, where Whisper had "gedachten.").
+- Cues can break mid-sentence, since cue cutting ignores sentence ends.
+- WER against the vote favours engines that are part of the majority; it is agreement.
+
+### Systematic comparison, step 5: CER and results per series
+`align.py` now also prints each engine's character error rate (CER) against the vote, and
+the WER against the vote per series (the folder a video is in). Test video:
+
+| engine | WER vs vote | CER vs vote |
+|---|---|---|
+| whisper | 3.2% | 1.2% |
+| parakeet | 4.3% | 2.0% |
+| wav2vec2 | 17.9% | 8.0% |
+| vosk | 15.8% | 9.8% |
+| canary | 4.8% | 1.6% |
+| voxtral | 11.2% | 11.0% |
+
+wav2vec2's errors are mostly run-together words and near-misses (WER more than twice its
+CER), Vosk more often has entirely different words, and Voxtral's CER stays high because
+its invented sentence counts in full.
+
+Status at this point: all five steps implemented and tested on one video; the full run
+follows below.
+
+### Systematic comparison: results on all 48 videos
+Rerun with word timings (`work/run_words.sh`): Whisper 545 s (slower with word
+timestamps), Parakeet 211 s, wav2vec2 197 s, Canary 362 s, Voxtral 2361 s, Vosk 693 s (one
+process per video). Compared with the first run (`work/run1/`): Parakeet, wav2vec2, Canary
+and Voxtral are byte-identical in all 48 `.srt` files. Whisper changed in all 48 (word
+timestamps change its segmentation, and it isn't deterministic anyway). Vosk changed in 47
+of 48; the unchanged one is presumably the first video in the batch, the only one with no
+video before it, which fits the order problem.
+
+`align.py` on all 48 videos (20 s), engines with capitals and punctuation first, so the
+vote takes their spelling:
+
+| engine | words | supported by ≥ 3 of 5 | by none | WER vs vote | CER vs vote |
+|---|---|---|---|---|---|
+| whisper | 27486 | 92.1% | 2.0% | 6.9% | 5.2% |
+| canary | 28364 | 90.6% | 4.1% | 6.9% | 3.2% |
+| voxtral | 34432 | 75.4% | 19.7% | 25.9% | 27.0% |
+| parakeet | 27711 | 89.3% | 5.4% | 10.8% | 5.7% |
+| wav2vec2 | 27802 | 79.2% | 16.9% | 23.5% | 11.3% |
+| vosk | 26494 | 84.4% | 11.9% | 21.2% | 12.6% |
+
+WER against the vote per series (from the first `align.py` run, with the engines in the
+order whisper, parakeet, wav2vec2, vosk, canary, voxtral; the order only matters for ties):
+
+| series | whisper | parakeet | wav2vec2 | vosk | canary | voxtral |
+|---|---|---|---|---|---|---|
+| balotje | 7.4% | 8.9% | 15.1% | 14.6% | 5.2% | 22.5% |
+| beestje | 24.8% | 16.5% | 34.0% | 38.0% | 7.4% | 67.5% |
+| bentje | 4.2% | 13.6% | 18.9% | 19.5% | 7.2% | 22.8% |
+| eend | 2.5% | 13.1% | 22.7% | 16.4% | 6.6% | 17.2% |
+| help | 8.1% | 15.5% | 22.3% | 11.8% | 8.6% | 31.7% |
+| jake | 5.2% | 12.3% | 28.7% | 19.5% | 8.0% | 29.7% |
+| kerst | 8.4% | 8.4% | 27.0% | 32.5% | 7.8% | 27.1% |
+| lammetje | 11.1% | 4.5% | 19.1% | 23.4% | 5.5% | 33.3% |
+| rinus | 5.7% | 12.9% | 22.4% | 10.7% | 7.8% | 42.7% |
+| sint | 9.2% | 8.5% | 31.6% | 37.4% | 11.2% | 23.9% |
+| tim | 5.1% | 25.4% | 31.6% | 17.9% | 3.7% | 25.6% |
+| vos | 5.8% | 4.2% | 17.9% | 15.3% | 4.2% | 15.7% |
+
+Findings:
+- **Whisper and Canary are tied overall** (6.9% WER against the vote); Canary has the
+  lowest CER (3.2%). Canary is the most consistent across series (3.7–11.2%); Whisper is
+  best in 5 series but falls to 24.8% in `beestje` (skipped openings).
+- Parakeet struggles with `tim` (25.4%, it drops words there) but is best in `lammetje`.
+- Voxtral's numbers are dominated by its invented sentence (see the Voxtral entries);
+  the vote removes it: none of the 48 vote files contain it.
+- Per-window and whole-file pairwise WER differ by at most 1.2 percentage points, so the
+  midpoint rule works.
+- The vote `.srt` files (`work/vote/`) contain the `beestje` openings Whisper skipped, with
+  the majority spelling "Mik". 28,323 words in total.
+- Caveat again: these are all measured against the majority, so engines that agree with
+  the majority score well by construction. Only hand-corrected references measure accuracy.
+
+Known weak spot of the vote `.srt`: cues are cut by pause/length only, not at sentence
+ends, so 985 cues start mid-sentence with a lowercase word (Whisper's own `.srt`: 143).
+Worth fixing before hand-correcting (see TODO).
 
 ## Reproducing
 
@@ -627,3 +787,45 @@ diff work/test/vosk-order/LeesWijs-bladerboek-33.vosk.srt work/test/vosk-repeat/
 The same order test was repeated with `load_vosk` changed to load a fresh model for every
 video (its `@functools.cache` removed). The output still differed, so that change was
 reverted.
+
+### Rerun with word timings
+
+First a copy of the previous outputs, then all engines again. Vosk runs one process per
+video (see "Reproducibility checks"). This is `work/run_words.sh`:
+
+```sh
+mkdir -p work/run1
+for e in whisper parakeet wav2vec2 vosk canary voxtral; do cp -R work/$e work/run1/$e; done
+
+for e in whisper parakeet wav2vec2 canary voxtral; do
+  start=$SECONDS
+  ./venv/bin/python transcribe.py --engine $e --output-dir work/$e videos/*/*.mp4 | grep -c -- '->'
+  echo "$e done in $((SECONDS-start))s"
+done
+start=$SECONDS
+for f in videos/*/*.mp4; do
+  ./venv/bin/python transcribe.py --engine vosk --output-dir work/vosk "$f" > /dev/null
+done
+echo "vosk done in $((SECONDS-start))s"
+```
+
+### Aligning within time windows
+
+```sh
+./venv/bin/python align.py work/whisper work/canary work/voxtral work/parakeet \
+    work/wav2vec2 work/vosk --out work/align --vote work/vote > work/align/summary.txt
+```
+
+Engines that write capitals and punctuation go first, so the vote takes their spelling.
+To compare the rerun with the first run:
+
+```sh
+for e in whisper parakeet wav2vec2 vosk canary voxtral; do
+  n=0
+  for f in work/run1/$e/*.srt; do cmp -s "$f" "work/$e/$(basename $f)" || n=$((n+1)); done
+  echo "$e: $n of 48 .srt files changed"
+done
+```
+
+For the one-video test, the six `.words.json` files were first copied into one folder per
+engine under `work/test/wordsets/`.

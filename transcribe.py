@@ -18,10 +18,16 @@ Engines:
 The .srt is written next to each video with the same basename, unless
 --output-dir is given. Engines other than whisper add their name to the file
 name (video.parakeet.srt) so they never overwrite the whisper subtitles.
+
+Next to each .srt goes a .words.json (video.words.json, video.parakeet.words.json)
+with every recognised word and its timing in seconds, for comparing engines word
+by word. Canary and Voxtral have no word timings: their words get the start and
+end of the audio piece they came from.
 """
 
 import argparse
 import functools
+import json
 import re
 import subprocess
 import sys
@@ -61,6 +67,10 @@ class Cue:
     text: str
 
 
+# (start, end, word), times in seconds.
+Word = tuple[float, float, str]
+
+
 # Whisper hallucinates on music/silence, producing cues like "***" or lone
 # punctuation. Drop any cue with no letters in it.
 def has_speech(text: str) -> bool:
@@ -76,9 +86,9 @@ def extract_audio(video: Path, wav: Path) -> None:
     )
 
 
-def words_to_cues(words: list[tuple[float, float, str]]) -> list[Cue]:
+def words_to_cues(words: list[Word]) -> list[Cue]:
     cues: list[Cue] = []
-    current: list[tuple[float, float, str]] = []
+    current: list[Word] = []
     for word in words:
         if current and (
             word[0] - current[-1][1] >= CUE_PAUSE_SECONDS
@@ -133,7 +143,8 @@ def text_to_cues(text: str, start: float, end: float) -> list[Cue]:
     return cues
 
 
-def run_whisper(wav: Path, model: str, language: str, prompt: str) -> list[Cue]:
+def run_whisper(wav: Path, model: str, language: str,
+                prompt: str) -> tuple[list[Cue], list[Word]]:
     import mlx_whisper
 
     result = mlx_whisper.transcribe(
@@ -143,9 +154,12 @@ def run_whisper(wav: Path, model: str, language: str, prompt: str) -> list[Cue]:
         task="transcribe",
         initial_prompt=prompt or None,
         condition_on_previous_text=False,  # reduces runaway repetition
+        word_timestamps=True,
         verbose=False,
     )
-    return [Cue(s["start"], s["end"], s["text"].strip()) for s in result["segments"]]
+    segments = result["segments"]
+    words = [(w["start"], w["end"], w["word"].strip()) for s in segments for w in s["words"]]
+    return [Cue(s["start"], s["end"], s["text"].strip()) for s in segments], words
 
 
 @functools.cache
@@ -155,7 +169,8 @@ def load_parakeet(model: str):
     return from_pretrained(model)
 
 
-def run_parakeet(wav: Path, model: str, language: str, prompt: str) -> list[Cue]:
+def run_parakeet(wav: Path, model: str, language: str,
+                 prompt: str) -> tuple[list[Cue], list[Word]]:
     from parakeet_mlx import DecodingConfig, SentenceConfig
 
     # Parakeet detects the language itself; --language and --prompt don't apply.
@@ -167,7 +182,15 @@ def run_parakeet(wav: Path, model: str, language: str, prompt: str) -> list[Cue]
     # Chunking keeps memory bounded on long videos.
     result = load_parakeet(model).transcribe(
         wav, decoding_config=config, chunk_duration=120.0, overlap_duration=15.0)
-    return [Cue(s.start, s.end, s.text.strip()) for s in result.sentences]
+    # Parakeet's tokens are word pieces; a piece starting with a space starts a word.
+    words: list[Word] = []
+    for token in result.tokens:
+        if words and not token.text.startswith(" "):
+            start, _, text = words[-1]
+            words[-1] = (start, token.end, text + token.text)
+        else:
+            words.append((token.start, token.end, token.text.strip()))
+    return [Cue(s.start, s.end, s.text.strip()) for s in result.sentences], words
 
 
 @functools.cache
@@ -179,7 +202,8 @@ def load_wav2vec2(model: str):
     return pipeline("automatic-speech-recognition", model=model, device=device)
 
 
-def run_wav2vec2(wav: Path, model: str, language: str, prompt: str) -> list[Cue]:
+def run_wav2vec2(wav: Path, model: str, language: str,
+                 prompt: str) -> tuple[list[Cue], list[Word]]:
     import soundfile
 
     # The model is Dutch-only; --language and --prompt don't apply.
@@ -189,7 +213,7 @@ def run_wav2vec2(wav: Path, model: str, language: str, prompt: str) -> list[Cue]
         chunk_length_s=30, stride_length_s=5, return_timestamps="word",
     )
     words = [(c["timestamp"][0], c["timestamp"][1], c["text"]) for c in result["chunks"]]
-    return words_to_cues(words)
+    return words_to_cues(words), words
 
 
 @functools.cache
@@ -200,24 +224,24 @@ def load_vosk(model: str):
     return vosk.Model(model_name=model)
 
 
-def run_vosk(wav: Path, model: str, language: str, prompt: str) -> list[Cue]:
-    import json
+def run_vosk(wav: Path, model: str, language: str,
+             prompt: str) -> tuple[list[Cue], list[Word]]:
     import wave
 
     from vosk import KaldiRecognizer
 
     # The model is Dutch-only; --language and --prompt don't apply.
-    words = []
+    result = []
     with wave.open(str(wav), "rb") as audio:
         recognizer = KaldiRecognizer(load_vosk(model), audio.getframerate())
         recognizer.SetWords(True)
         while data := audio.readframes(4000):
             if recognizer.AcceptWaveform(data):
-                words += json.loads(recognizer.Result()).get("result", [])
-        words += json.loads(recognizer.FinalResult()).get("result", [])
+                result += json.loads(recognizer.Result()).get("result", [])
+        result += json.loads(recognizer.FinalResult()).get("result", [])
     # <unk> marks sounds the model couldn't match to any word.
-    return words_to_cues([(w["start"], w["end"], w["word"]) for w in words
-                          if w["word"] != "<unk>"])
+    words = [(w["start"], w["end"], w["word"]) for w in result if w["word"] != "<unk>"]
+    return words_to_cues(words), words
 
 
 @functools.cache
@@ -227,32 +251,36 @@ def load_mlx_audio(model: str):
     return load(model)
 
 
-def run_canary(wav: Path, model: str, language: str, prompt: str) -> list[Cue]:
+def run_canary(wav: Path, model: str, language: str,
+               prompt: str) -> tuple[list[Cue], list[Word]]:
     import soundfile
 
     # Canary has no prompt; --prompt doesn't apply.
     audio, rate = soundfile.read(wav, dtype="float32")
-    cues = []
+    cues, words = [], []
     for a, b in split_at_pauses(audio, rate):
         text = load_mlx_audio(model).generate(
             audio[a:b], source_lang=language, target_lang=language, use_pnc=True).text
         cues += text_to_cues(text, a / rate, b / rate)
-    return cues
+        words += [(a / rate, b / rate, w) for w in text.split()]
+    return cues, words
 
 
-def run_voxtral(wav: Path, model: str, language: str, prompt: str) -> list[Cue]:
+def run_voxtral(wav: Path, model: str, language: str,
+                prompt: str) -> tuple[list[Cue], list[Word]]:
     import soundfile
 
     # Voxtral takes no prompt in transcription mode; --prompt doesn't apply.
     audio, rate = soundfile.read(wav, dtype="float32")
     piece = wav.with_name("piece.wav")
-    cues = []
+    cues, words = [], []
     for a, b in split_at_pauses(audio, rate):
         # mlx-audio's Voxtral only accepts a file path, not an array.
         soundfile.write(piece, audio[a:b], rate)
         text = load_mlx_audio(model).generate(str(piece), language=language).text
         cues += text_to_cues(text, a / rate, b / rate)
-    return cues
+        words += [(a / rate, b / rate, w) for w in text.split()]
+    return cues, words
 
 
 ENGINES = {
@@ -284,14 +312,17 @@ def transcribe(video: Path, engine: str, model: str, language: str, prompt: str,
     with tempfile.TemporaryDirectory() as tmp:
         wav = Path(tmp) / "audio.wav"
         extract_audio(video, wav)
-        cues = ENGINES[engine](wav, model, language, prompt)
+        cues, words = ENGINES[engine](wav, model, language, prompt)
 
     cues = [c for c in cues if has_speech(c.text)]
 
-    suffix = ".srt" if engine == "whisper" else f".{engine}.srt"
-    out = (output_dir or video.parent) / (video.stem + suffix)
+    name = video.stem if engine == "whisper" else f"{video.stem}.{engine}"
+    out = (output_dir or video.parent) / f"{name}.srt"
     write_srt(cues, out)
-    print(f"{video} -> {out}  ({len(cues)} cues)")
+    (out.parent / f"{name}.words.json").write_text(json.dumps(
+        [{"start": round(a, 3), "end": round(b, 3), "word": w} for a, b, w in words],
+        ensure_ascii=False, indent=0), encoding="utf-8")
+    print(f"{video} -> {out}  ({len(cues)} cues, {len(words)} words)")
 
 
 def main() -> int:

@@ -16,7 +16,8 @@ engines:
 | `vosk` | [Vosk](https://alphacephei.com/vosk/) with `vosk-model-nl-spraakherkenning-0.6` (the [Kaldi_NL](https://github.com/opensource-spraakherkenning-nl/Kaldi_NL) model) | Dutch only, runs on the CPU. Lowercase, no punctuation. |
 
 `compare.py` compares the output of these engines with each other and, once they exist,
-with hand-corrected reference subtitles. See [JOURNAL.md](JOURNAL.md) for the plan and
+with hand-corrected reference subtitles. `align.py` compares them word by word and makes a
+majority-vote transcript. See [JOURNAL.md](JOURNAL.md) for the plan and
 results so far.
 
 ## Requirements
@@ -91,10 +92,32 @@ by side. Use these sheets as a guide for hand-correcting. `--min-disagree N` lis
 cues where at least N other engines disagree. wav2vec2 often runs words together, so
 requiring more than one engine to disagree gives a much shorter list.
 
+### Word-by-word comparison and majority vote
+
+`transcribe.py` also writes a `.words.json` next to every `.srt`, with each word's timing.
+`align.py` uses these to compare all engines word by word:
+
+```sh
+./venv/bin/python align.py work/whisper work/canary work/voxtral work/parakeet \
+    work/wav2vec2 work/vosk --out work/align --vote work/vote
+```
+
+The vote takes a word's spelling and punctuation from the first engine on the command line
+that has it, so put engines that write capitals and punctuation first.
+
+It cuts each video into windows of at most 15 seconds at pauses, puts every engine's
+words into the window they were spoken in, and aligns the engines within each window,
+all pairs and all together. It prints, per engine, how many of its words other engines
+confirm. `--out` writes one Markdown file per video with, per window, the majority-vote
+text and the word positions where the engines disagree. `--vote` writes a majority-vote
+`.srt` per video. The majority can be wrong, so use it as a draft to correct, not as a
+reference.
+
 ### Accuracy against hand-corrected references
 
-1. Copy the Whisper `.srt` of a video into `references/` and correct it by hand, using its
-   review sheet. Keep the file name (`LeesWijs-bladerboek-33.srt`).
+1. Copy the majority-vote `.srt` (or the Whisper `.srt`) of a video into `references/` and
+   correct it by hand, using its review sheet or `align.py` output. Keep the file name
+   (`LeesWijs-bladerboek-33.srt`).
 2. Run `compare.py` with `--reference references`. It prints each engine's WER against the
    corrected files.
 
