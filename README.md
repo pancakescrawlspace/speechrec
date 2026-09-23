@@ -3,7 +3,7 @@
 A proof of concept for generating subtitles for our company's video files automatically.
 It runs speech recognition locally on Apple Silicon, so no audio leaves the machine.
 
-`transcribe.py` writes an `.srt` subtitle file for each input video, using one of six
+`transcribe.py` writes an `.srt` subtitle file for each input video, using one of seven
 engines:
 
 | Engine | Model | Notes |
@@ -11,6 +11,7 @@ engines:
 | `whisper` (default) | OpenAI Whisper large-v3-turbo, via [mlx-whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper) | The baseline. Capitals and punctuation. |
 | `parakeet` | NVIDIA Parakeet TDT 0.6B v3, via [parakeet-mlx](https://github.com/senstella/parakeet-mlx) | Multilingual (25 European languages), detects the language itself. Capitals and punctuation. |
 | `wav2vec2` | [jonatasgrosman/wav2vec2-large-xlsr-53-dutch](https://huggingface.co/jonatasgrosman/wav2vec2-large-xlsr-53-dutch), via transformers | Dutch only. Lowercase, no punctuation. |
+| `wav2vec2-lm` | The same model, decoded with its own Dutch 5-gram language model, via pyctcdecode and kenlm | Fewer garbled words, but its mistakes are more often real (wrong) words. Needs an extra setup step, see below. Slower. |
 | `canary` | NVIDIA Canary 1B v2 ([MLX conversion](https://huggingface.co/CogniSoftOrg/canary-1b-v2-mlx-bf16)), via [mlx-audio](https://github.com/Blaizzy/mlx-audio) | Multilingual (25 European languages). Capitals and punctuation. No timestamps of its own, so cue timing is approximate. |
 | `voxtral` | Mistral Voxtral Mini 3B ([MLX conversion](https://huggingface.co/mlx-community/Voxtral-Mini-3B-2507-bf16)), via mlx-audio | Multilingual. Capitals and punctuation. No timestamps of its own. Can invent text during music or silence. About 5× slower than the others. |
 | `vosk` | [Vosk](https://alphacephei.com/vosk/) with `vosk-model-nl-spraakherkenning-0.6` (the [Kaldi_NL](https://github.com/opensource-spraakherkenning-nl/Kaldi_NL) model) | Dutch only, runs on the CPU. Lowercase, no punctuation. |
@@ -46,6 +47,22 @@ unzip -q vosk-model-nl-spraakherkenning-0.6.zip && rm vosk-model-nl-spraakherken
 cd -
 ```
 
+The `wav2vec2-lm` engine needs two packages that `requirements.txt` can't install:
+`pyctcdecode` pins numpy below 2.0 (it predates numpy 2, but works with it), and the
+`kenlm` release doesn't compile on Python 3.13, so it is built from source after
+regenerating its Cython code (needs `cmake`, e.g. from MacPorts or Homebrew):
+
+```sh
+./venv/bin/pip install --no-deps pyctcdecode==0.5.0
+mkdir -p work/build && cd work/build
+curl -fLO https://github.com/kpu/kenlm/archive/master.zip && unzip -q master.zip
+python3.13 -m venv cython && cython/bin/pip install cython
+cython/bin/cython --cplus -3 kenlm-master/python/kenlm.pyx -o kenlm-master/python/kenlm.cpp
+cd - && ./venv/bin/pip install work/build/kenlm-master
+```
+
+Its language model (1.4 GB) downloads on first use into `~/.cache/pyctcdecode`.
+
 [JOURNAL.md](JOURNAL.md) has a "Reproducing" section with every command used so far.
 
 ## Transcribing
@@ -58,7 +75,7 @@ Options:
 
 | Option | Default | Purpose |
 |---|---|---|
-| `--engine NAME` | `whisper` | `whisper`, `parakeet`, `wav2vec2`, `vosk`, `canary` or `voxtral`. |
+| `--engine NAME` | `whisper` | `whisper`, `parakeet`, `wav2vec2`, `wav2vec2-lm`, `vosk`, `canary` or `voxtral`. |
 | `--output-dir DIR` | next to each video | Write the `.srt` files to this folder instead (created if missing). |
 | `--model NAME` | per engine, see `DEFAULT_MODELS` | Another model for the chosen engine: a Hugging Face repo, or for Vosk a model name in `~/.cache/vosk`. |
 | `--language CODE` | `nl` | Whisper, Canary and Voxtral only. ISO 639-1 language code. |
@@ -75,7 +92,7 @@ separate process, because otherwise earlier videos in the same run affect the re
 To run all engines on all videos, one output folder per engine:
 
 ```sh
-for e in whisper parakeet wav2vec2 vosk canary voxtral; do
+for e in whisper parakeet wav2vec2-lm vosk canary voxtral; do
   ./venv/bin/python transcribe.py --engine $e --output-dir work/$e videos/*/*.mp4
 done
 ```
@@ -104,8 +121,13 @@ requiring more than one engine to disagree gives a much shorter list.
 
 ```sh
 ./venv/bin/python align.py work/whisper work/canary work/voxtral work/parakeet \
-    work/wav2vec2 work/vosk --out work/align --vote work/vote
+    work/wav2vec2-lm work/vosk --out work/align --vote work/vote
 ```
+
+Use either `wav2vec2` or `wav2vec2-lm`, not both: they share the same acoustic model and
+would count double in the vote. `--lexicon FILE` (a word list, one per line, for example
+the language model's `unigrams.txt`) also splits each engine's mistakes into real words,
+which are easy to miss when correcting, and non-words, which stand out.
 
 Capitals and punctuation in the vote are decided by the engines that write them; ties go
 to the engine listed first, so list the most reliable engines first.
@@ -145,7 +167,7 @@ a model later, or its scores will look better than they are.
    `***` or lone punctuation during music or silence.
 4. The remaining segments are written out as an `.srt` file.
 
-Parakeet, wav2vec2 and Vosk return timings per word instead of per segment. The script groups
+Parakeet, wav2vec2(-lm) and Vosk return timings per word instead of per segment. The script groups
 those words into cues itself: a new cue starts after a pause of 0.8 seconds, after 14
 words, or when a cue would last longer than 7 seconds.
 
@@ -159,8 +181,6 @@ This is a proof of concept, so:
 
 - It only runs on Apple Silicon.
 - The cue filtering, cue grouping and decoding settings are hard-coded in `transcribe.py`.
-- wav2vec2 runs without its optional language model (that needs the `kenlm` and
-  `pyctcdecode` packages), which makes it less accurate than it could be.
 - There are no hand-corrected references yet, so no engine has an accuracy score.
 - Whisper sometimes skips a passage (for example a sung opening); a fixed random seed
   makes this repeatable, not rarer. See JOURNAL.md.

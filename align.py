@@ -32,6 +32,9 @@ Output:
     together or apart ("daarnet"/"daar net").
   - With --out: one Markdown file per video: per window the majority-vote text and a
     table of the word positions where engines disagree.
+  - With --lexicon: a word list (one word per line). For each engine, its wrong and extra
+    words against the vote are split into real words (invisible mistakes: the sentence
+    still reads normally) and non-words (visible mistakes, easy to spot when correcting).
   - With --vote: one .srt per video with the majority-vote transcript, as a starting
     point for hand-correcting. Capitals and punctuation are voted on as well, by the
     engines with the winning word that use capitals or punctuation somewhere in that
@@ -264,7 +267,11 @@ def main() -> int:
                     help="folders of .words.json files, one per engine")
     ap.add_argument("--out", type=Path, help="write one Markdown file per video here")
     ap.add_argument("--vote", type=Path, help="write majority-vote .srt files here")
+    ap.add_argument("--lexicon", type=Path,
+                    help="word list, one per line: split mistakes into real words and non-words")
     args = ap.parse_args()
+    lexicon = ({w.strip().lower() for w in args.lexicon.read_text("utf-8").splitlines()}
+               if args.lexicon else None)
 
     engines = {folder.name: load_words(folder) for folder in args.engines}
     names = list(engines)
@@ -279,7 +286,7 @@ def main() -> int:
 
     others = len(names) - 1
     majority = others // 2 + 1
-    stats = {n: {"words": 0, "majority": 0, "none": 0} for n in names}
+    stats = {n: {"words": 0, "majority": 0, "none": 0, "real": 0, "nonword": 0} for n in names}
     # Per series and engine: [word errors, vote words, char errors, vote chars].
     by_series: dict[str, dict[str, list[int]]] = {}
     pair_errors = {p: [0, 0, 0] for p in combinations(names, 2)}  # windowed, whole, ref words
@@ -324,6 +331,15 @@ def main() -> int:
             voted = voted_tokens(columns, names)
             vote_norms = [w for _, _, word in voted for w in normalize(word)]
             for n in names:
+                if lexicon is not None:
+                    if vote_norms:
+                        wrong = [t for chunk in alignment(vote_norms, norms(tokens[n]))
+                                 if chunk.type in ("substitute", "insert")
+                                 for t in tokens[n][chunk.hyp_start_idx:chunk.hyp_end_idx]]
+                    else:  # nothing voted here: every word is extra
+                        wrong = tokens[n]
+                    for t in wrong:
+                        stats[n]["real" if t.norm in lexicon else "nonword"] += 1
                 e, total = error_counts(vote_norms, norms(tokens[n]))
                 ce, ctotal = char_errors(vote_norms, norms(tokens[n]))
                 for k, v in enumerate((e, total, ce, ctotal)):
@@ -358,6 +374,16 @@ def main() -> int:
         e, total, ce, ctotal = totals[n]
         print(f"| {n:<10} | {s['words']:>7} | {s['majority'] / w:>9.1%} | {s['none'] / w:>6.1%} "
               f"| {e / max(total, 1):>6.1%} | {ce / max(ctotal, 1):>6.1%} |")
+
+    if lexicon is not None:
+        print("\nWrong and extra words against the vote: real words (invisible mistakes) "
+              "and non-words (visible)\n")
+        print(f"| {'engine':<10} | {'wrong':>7} | {'real word':>9} | {'non-word':>8} |")
+        print(f"|{'-' * 12}|{'-' * 9}|{'-' * 11}|{'-' * 10}|")
+        for n, s in stats.items():
+            wrong = s["real"] + s["nonword"]
+            print(f"| {n:<10} | {wrong:>7} | {s['real'] / max(wrong, 1):>9.1%} "
+                  f"| {s['nonword'] / max(wrong, 1):>8.1%} |")
 
     print("\nWER against the majority vote per series\n")
     print(f"| {'series':<10} | " + " | ".join(f"{n:>8}" for n in names) + " |")

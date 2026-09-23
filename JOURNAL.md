@@ -83,7 +83,6 @@ videos in the same process.
   without speech (voice activity detection) instead of filtering its text afterwards.
 - Try Voxtral Mini 4B Realtime.
 - Proper timestamps for Canary via its CTC model (forced alignment).
-- wav2vec2 with its language model (`kenlm`, `pyctcdecode`).
 - Hand-correct a reference set (René), starting from the vote `.srt` files in `work/vote/`,
   then score all engines against it with `compare.py --reference references`.
 
@@ -624,6 +623,93 @@ The seeded output is now the standard `work/whisper/`; the previous one is in
 `work/run2/whisper/`. The vote was regenerated; the scores against it are unchanged
 (Whisper 6.8% WER, 5.3% CER; 28,688 words in the vote files).
 
+### wav2vec2 with its language model (`wav2vec2-lm`)
+The wav2vec2 model repo contains a Dutch 5-gram language model (`language_model/lm.binary`,
+1.4 GB, plus a word list `unigrams.txt` of 1.4 million entries). The model author's own
+results on Common Voice 6 (Dutch test set): WER 15.7% without it, 12.8% with it.
+
+Setup problems and solutions:
+- `pyctcdecode` 0.5.0 (latest, from before numpy 2) pins `numpy<2.0`, which would have
+  downgraded numpy for all engines. Its code uses none of the numpy features that numpy 2
+  removed, so it was installed with `--no-deps` (its other dependencies, `pygtrie` and
+  `hypothesis`, normally). `pip check` now reports that pin; that is expected.
+- `kenlm` 0.3.0 from PyPI, and also the GitHub source, fail to compile on Python 3.13: they
+  ship C++ code that an old Cython generated, using CPython internals 3.13 removed
+  (`_PyGC_FINALIZED`, `_PyDict_SetItem_KnownHash`, `_PyLong_AsByteArray`). Fixed by
+  regenerating that code from `kenlm.pyx` with Cython 3.3.0 (in a throwaway environment)
+  before building.
+- Both are excluded from `requirements.txt` (`pip freeze --exclude kenlm --exclude
+  pyctcdecode`), since `pip install -r` can't install them; the README has the steps.
+- With `kenlm` and `pyctcdecode` installed, the `transformers` pipeline loads the language
+  model on its own. `transcribe.py` now passes the feature extractor itself, which stops
+  that, and adds the decoder only for the new engine `wav2vec2-lm`. The plain `wav2vec2`
+  output stayed byte-identical.
+- pyctcdecode caches the language model in `~/.cache/pyctcdecode`, not in the Hugging Face
+  cache.
+
+**René's observation about visible and invisible errors.** Without a language model,
+wav2vec2's mistakes are visible ("aardepelburee"): a reader recognises the intended word.
+A language model turns uncertainty into real words; when that word is wrong, the mistake
+is invisible and only listening reveals it. WER counts both the same. So for each engine,
+every wrong or extra word (against the vote) was checked against the language model's
+word list: real word (invisible) or not (visible). Test video `vos/LeesWijs-bladerboek-33`:
+
+| engine | WER vs vote | wrong words | real word (invisible) | non-word (visible) | missing |
+|---|---|---|---|---|---|
+| whisper | 2.1% | 13 | 12 | 1 | 8 |
+| canary | 4.6% | 38 | 28 | 10 | 9 |
+| parakeet | 4.2% | 33 | 29 | 4 | 10 |
+| voxtral | 11.4% | 110 | 95 | 15 | 7 |
+| wav2vec2 | 17.7% | 147 | 111 | 36 | 34 |
+| wav2vec2-lm | 15.2% | 132 | 115 | 17 | 24 |
+| vosk | 15.7% | 101 | 99 | 2 | 60 |
+
+- The language model helps wav2vec2 somewhat and halves its visible mistakes, while its
+  invisible ones rise slightly: just as René predicted.
+- Vosk's mistakes are nearly always invisible: Kaldi can only output words from its fixed
+  vocabulary. It also drops the most words.
+- Caveat: the word list comes from web text and includes typos, so it counts some garbled
+  words as real; the invisible counts are upper limits. It does contain "aardappelpuree"
+  and "opblaasboot" but not "aardepelburee" or "oplaasboot". The vote (which included plain
+  wav2vec2 here) is the yardstick, not a verified reference.
+- "visvos" became "vis vos"; "aardepelburee" stayed, although "aardappelpuree" is in the
+  word list: the beam search didn't reach it.
+
+### wav2vec2-lm on all 48 videos
+281 s for all 48 videos (plain wav2vec2: about 200 s), so the language model search is
+cheap. Scored against the vote of the five other engines (without either wav2vec2, since
+both share the acoustic model and would count double):
+
+| | WER | wrong words | real word (invisible) | non-word (visible) | missing |
+|---|---|---|---|---|---|
+| wav2vec2 | 23.9% | 5,583 | 3,716 (67%) | 1,867 (33%) | 1,212 |
+| wav2vec2-lm | 19.4% | 4,668 | 3,884 (83%) | 784 (17%) | 849 |
+
+A relative gain of about 19%, in line with the author's own Common Voice results (15.7% →
+12.8%). Visible mistakes drop by 58%, invisible ones rise by 5%. Still well behind Whisper
+and Canary.
+
+`wav2vec2-lm` replaces plain `wav2vec2` in the standard vote (never both). `align.py` got
+`--lexicon FILE`, which splits each engine's wrong and extra words against the vote into
+real words and non-words (a bug in the first version skipped windows where the vote was
+empty, so Voxtral's invented sentences weren't counted). Six engines, all 48 videos:
+
+| engine | WER vs vote | CER vs vote | wrong words | real word (invisible) | non-word (visible) |
+|---|---|---|---|---|---|
+| whisper | 6.7% | 5.2% | 647 | 82.5% | 17.5% |
+| canary | 7.0% | 3.4% | 1,598 | 72.1% | 27.9% |
+| voxtral | 25.8% | 26.6% | 7,185 | 84.5% | 15.5% |
+| parakeet | 11.2% | 6.0% | 2,036 | 76.0% | 24.0% |
+| wav2vec2-lm | 18.9% | 8.7% | 4,417 | 82.8% | 17.2% |
+| vosk | 21.5% | 13.1% | 3,671 | 98.3% | 1.7% |
+
+- Whisper makes by far the fewest mistakes, but they are mostly invisible.
+- Canary's mistakes are the most often visible: easier to catch when correcting.
+- Vosk's are almost never visible (fixed vocabulary).
+- Same caveat as before: the word list is generous, so "real word" shares are upper limits.
+
+The vote now has 28,656 words (it had 28,688 with plain wav2vec2).
+
 ## Reproducing
 
 Every command used so far, grouped by purpose. Run from the repository root on an Apple
@@ -1035,4 +1121,86 @@ mkdir -p work/run2 && mv work/whisper work/run2/whisper
 cp -R work/test/whisper-seeded-1 work/whisper
 ./venv/bin/python align.py work/whisper work/canary work/voxtral work/parakeet \
     work/wav2vec2 work/vosk --out work/align --vote work/vote > work/align/summary.txt
+```
+
+### wav2vec2 with its language model
+
+The author's evaluation results and the repo contents:
+
+```sh
+./venv/bin/python - <<'PY'
+from huggingface_hub import HfApi, hf_hub_download
+repo = "jonatasgrosman/wav2vec2-large-xlsr-53-dutch"
+for f in HfApi().model_info(repo, files_metadata=True).siblings:
+    print(f.rfilename, f.size)
+for f in ["mozilla-foundation_common_voice_6_0_nl_test_eval_results_greedy.txt",
+          "mozilla-foundation_common_voice_6_0_nl_test_eval_results.txt",
+          "language_model/attrs.json"]:
+    print(f, open(hf_hub_download(repo, f)).read())
+PY
+```
+
+Packages (see the entry above for why they're installed this way):
+
+```sh
+./venv/bin/pip install --dry-run kenlm pyctcdecode      # would downgrade numpy to 1.26.4
+./venv/bin/pip download --no-deps pyctcdecode==0.5.0 -d work/test/pyctc
+unzip -p work/test/pyctc/pyctcdecode-0.5.0*.whl '*/METADATA' | grep '^Requires-Dist'
+./venv/bin/pip install --no-deps pyctcdecode==0.5.0
+./venv/bin/pip install pygtrie hypothesis
+
+./venv/bin/pip install kenlm                             # fails on Python 3.13
+cd work/test
+curl -sSfL -o kenlm.zip https://github.com/kpu/kenlm/archive/master.zip && unzip -q kenlm.zip
+/opt/local/bin/python3.13 -m venv cy && cy/bin/pip install cython
+cy/bin/cython --cplus -3 kenlm-master/python/kenlm.pyx -o kenlm-master/python/kenlm.cpp
+cd ../.. && ./venv/bin/pip install work/test/kenlm-master
+
+./venv/bin/pip freeze --exclude kenlm --exclude pyctcdecode > requirements.txt
+```
+
+Test and full run:
+
+```sh
+V=videos/vos/LeesWijs-bladerboek-33.mp4
+./venv/bin/python transcribe.py --engine wav2vec2 --output-dir work/test/lm/raw $V
+cmp work/test/lm/raw/LeesWijs-bladerboek-33.wav2vec2.srt work/wav2vec2/LeesWijs-bladerboek-33.wav2vec2.srt
+./venv/bin/python transcribe.py --engine wav2vec2-lm --output-dir work/test/lm/lm $V
+./venv/bin/python transcribe.py --engine wav2vec2-lm --output-dir work/wav2vec2-lm videos/*/*.mp4
+```
+
+Visible and invisible errors (the word list is the language model's `unigrams.txt`,
+copied from `~/.cache/pyctcdecode/.../language_model/`; `work/test/lm/one/<engine>/` holds
+each engine's `.srt` for the test video, `work/test/lm/one/vote/` the vote):
+
+```sh
+cp ~/.cache/pyctcdecode/models--jonatasgrosman--wav2vec2-large-xlsr-53-dutch/snapshots/*/language_model/unigrams.txt \
+    work/test/nl-words.txt
+./venv/bin/python - <<'PY'
+from pathlib import Path
+import jiwer
+import compare as c
+lexicon = {w.strip().lower() for w in open("work/test/nl-words.txt", encoding="utf-8")}
+ref = c.words_of(c.read_srt(Path("work/test/lm/one/vote/LeesWijs-bladerboek-33.srt")))
+for e in ["whisper", "canary", "voxtral", "parakeet", "wav2vec2", "wav2vec2-lm", "vosk"]:
+    hyp = c.words_of(c.read_srt(next(Path(f"work/test/lm/one/{e}").glob("*.srt"))))
+    out = jiwer.process_words(" ".join(ref), " ".join(hyp))
+    wrong = [w for ch in out.alignments[0] if ch.type in ("substitute", "insert")
+             for w in hyp[ch.hyp_start_idx:ch.hyp_end_idx]]
+    real = sum(w in lexicon for w in wrong)
+    errors = out.substitutions + out.deletions + out.insertions
+    print(e, f"{errors/len(ref):.1%}", len(wrong), real, len(wrong) - real, out.deletions)
+PY
+```
+
+Scoring both wav2vec2 variants against the other five, and the standard run:
+
+```sh
+./venv/bin/python align.py work/whisper work/canary work/voxtral work/parakeet work/vosk \
+    --vote work/test/vote-no-w2v
+./venv/bin/python compare.py work/wav2vec2 work/wav2vec2-lm --reference work/test/vote-no-w2v
+
+./venv/bin/python align.py work/whisper work/canary work/voxtral work/parakeet \
+    work/wav2vec2-lm work/vosk --out work/align --vote work/vote \
+    --lexicon work/test/nl-words.txt > work/align/summary.txt
 ```

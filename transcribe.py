@@ -10,6 +10,8 @@ Engines:
     parakeet  NVIDIA Parakeet TDT 0.6B v3 via parakeet-mlx
     wav2vec2  A Dutch fine-tuned wav2vec2 (XLSR-53) via transformers; lowercase,
               no punctuation
+    wav2vec2-lm  The same, decoded with the model's own Dutch 5-gram language model
+              (needs kenlm and pyctcdecode, see JOURNAL.md)
     vosk      Vosk (Kaldi) with its large Dutch model; lowercase, no punctuation
     canary    NVIDIA Canary 1B v2 via mlx-audio; no timestamps of its own, so cue
               timing is approximate (see split_at_pauses)
@@ -39,6 +41,7 @@ DEFAULT_MODELS = {
     "whisper": "mlx-community/whisper-large-v3-turbo",
     "parakeet": "mlx-community/parakeet-tdt-0.6b-v3",
     "wav2vec2": "jonatasgrosman/wav2vec2-large-xlsr-53-dutch",
+    "wav2vec2-lm": "jonatasgrosman/wav2vec2-large-xlsr-53-dutch",
     # Not on Hugging Face: vosk downloads its models to ~/.cache/vosk by name.
     "vosk": "vosk-model-nl-spraakherkenning-0.6",
     "canary": "CogniSoftOrg/canary-1b-v2-mlx-bf16",
@@ -208,21 +211,29 @@ def run_parakeet(wav: Path, model: str, language: str,
 
 
 @functools.cache
-def load_wav2vec2(model: str):
+def load_wav2vec2(model: str, with_lm: bool):
     import torch
-    from transformers import pipeline
+    from transformers import AutoFeatureExtractor, pipeline
 
+    # Passing the feature extractor ourselves stops the pipeline from loading the
+    # language model on its own whenever kenlm and pyctcdecode are installed.
+    kwargs = {"feature_extractor": AutoFeatureExtractor.from_pretrained(model)}
+    if with_lm:
+        from pyctcdecode import BeamSearchDecoderCTC
+
+        kwargs["decoder"] = BeamSearchDecoderCTC.load_from_hf_hub(
+            model, allow_patterns=["language_model/*", "alphabet.json"])
     device = "mps" if torch.backends.mps.is_available() else "cpu"
-    return pipeline("automatic-speech-recognition", model=model, device=device)
+    return pipeline("automatic-speech-recognition", model=model, device=device, **kwargs)
 
 
-def run_wav2vec2(wav: Path, model: str, language: str,
-                 prompt: str) -> tuple[list[Cue], list[Word]]:
+def run_wav2vec2(wav: Path, model: str, language: str, prompt: str,
+                 with_lm: bool = False) -> tuple[list[Cue], list[Word]]:
     import soundfile
 
     # The model is Dutch-only; --language and --prompt don't apply.
     audio, rate = soundfile.read(wav, dtype="float32")
-    result = load_wav2vec2(model)(
+    result = load_wav2vec2(model, with_lm)(
         {"raw": audio, "sampling_rate": rate},
         chunk_length_s=30, stride_length_s=5, return_timestamps="word",
     )
@@ -301,6 +312,7 @@ ENGINES = {
     "whisper": run_whisper,
     "parakeet": run_parakeet,
     "wav2vec2": run_wav2vec2,
+    "wav2vec2-lm": functools.partial(run_wav2vec2, with_lm=True),
     "vosk": run_vosk,
     "canary": run_canary,
     "voxtral": run_voxtral,
