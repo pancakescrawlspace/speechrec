@@ -81,7 +81,8 @@ videos in the same process.
   (worked around by running each video in its own process).
 - Voxtral: stop the invented sentence on music/silence properly, e.g. by skipping pieces
   without speech (voice activity detection) instead of filtering its text afterwards.
-- Voxtral Realtime: derive real word timings from its token positions.
+- Voxtral Realtime on whole videos (with a higher `max_tokens`) instead of 15 s pieces:
+  does the text change?
 - Hand-correct a reference set (René), starting from the vote `.srt` files in `work/vote/`,
   then score all engines against it with `compare.py --reference references`.
 
@@ -930,6 +931,121 @@ have no timing of their own):
   the start and 70 ms at the end (95%: 0.21 s and 0.41 s), since Canary now counts in
   each word's median.
 
+### Word timings for Voxtral Realtime (`voxtral-rt`)
+Until now, every Voxtral Realtime word got the start and end of its 15 s piece. The model
+emits one token per 80 ms of audio (1,280 samples), so a token's position gives its time.
+mlx-audio's `generate()` only returns the text, so `transcribe.py` now has its own copy of
+the decoding loop (`voxtral_rt_tokens`, from mlx-audio 0.5.5, greedy), which keeps the
+token list. Token *i* of the output comes from decoder position
+`prompt_len - 1 + i` (`prompt_len = 1 + 32 left-padding tokens + 6 delay tokens`), which
+works out at about *i* × 80 ms into the piece plus the model's delay.
+
+What the tokens look like (8–22 s of the test video, 4-bit model): before each word the
+model emits a `[STREAMING_WORD]` token (id 33, decodes to nothing), then the word's pieces
+(`' a' 'ard' 'app' 'el' 'pure' 'e'`), each starting with a space at a new word; silence is
+`[STREAMING_PAD]` (32). Some words follow the previous one without a marker (`' bed' 'acht'
+' hij'`). Words are mapped to tokens by byte offset in the decoded text, and the text is
+split exactly as before (`text.split()`), so it can't change.
+
+A first test with my own loop gave a shorter text ("… zou erg lekker zijn." without "met
+gebakken vis."): a 15 s piece is longer than the encoder's sliding window, so mlx-audio
+encodes it in chunks during decoding, and the loop has to do the same. The copy in
+`transcribe.py` now follows `generate()` line by line.
+
+**Calibration** on `vos/LeesWijs-bladerboek-33` (4-bit model), as for Canary (`timings.py`).
+With the raw token times (a word from its first token to the end of its last), Voxtral
+Realtime is late:
+
+| against | start: median | quartiles | end: median | quartiles |
+|---|---|---|---|---|
+| whisper | +0.50 s | +0.35 to +0.67 | +0.24 s | +0.20 to +0.34 |
+| parakeet | +0.39 s | +0.27 to +0.51 | +0.12 s | +0.02 to +0.20 |
+
+A word's first token comes once most of the word has been heard, so starts are later
+than ends and vary more. Not letting a start come before the previous word's end
+helped most here: Parakeet starts within 0.2 s went from 70% to 88% with the same
+offsets. A grid over both offsets (`timings.py --shift` on the raw times) gave
+**start 0.64 s, end 0.20 s** (`VOXTRAL_RT_START_OFFSET`, `VOXTRAL_RT_END_OFFSET`),
+which lands between Whisper and Parakeet:
+
+| against | start: median | quartiles | within 0.2 s | end: median | within 0.2 s |
+|---|---|---|---|---|---|
+| whisper | +0.04 s | −0.01 to +0.11 | 88% | +0.04 s | 84% |
+| parakeet | −0.07 s | −0.15 to +0.01 | 86% | −0.08 s | 76% |
+
+The full-precision model on the same video (14 minutes): **the text is word-for-word the
+same as in `work/voxtral-rt/`** (1,012 words), and the calibration holds (starts +0.04 s
+against Whisper and −0.05 s against Parakeet, 87–88% within 0.2 s). The 4-bit text is also
+the same as its earlier run (1,014 words).
+
+Voxtral Realtime's `.srt` cues are now made from its word timings (`words_to_cues`, like
+Parakeet's), no longer by sharing each piece's time out by text length. The text stays the
+same word for word; the cue boundaries differ.
+
+The 15 s pieces stay: a whole video would exceed the 4,096-token limit. Testing a whole video
+with a higher `max_tokens` is still open.
+
+Running Voxtral Realtime on all 48 videos again, first 4-bit (for calibration on all
+videos), then full precision (for the standard vote): `work/run_timings.sh`, started
+11:06 after the Canary run.
+
+**4-bit, all 48 videos** (11:13–12:54, 6,038 s, against 6,317 s for its first run; the laptop
+was in use for other work meanwhile). The text is word-for-word the same as before in all
+48 videos (`.words.json` and `.srt`). The calibration holds (25,000 words matched):
+
+| against | start: median | quartiles | within 0.2 s | end: median | within 0.2 s |
+|---|---|---|---|---|---|
+| whisper | +0.05 s | 0.00 to +0.13 | 86% | +0.05 s | 82% |
+| parakeet | −0.06 s | −0.14 to +0.02 | 85% | −0.07 s | 77% |
+
+Full precision started at 12:54. From 13:39 to 15:05 the Mac was in idle sleep (on the
+charger, `pmset` sleep timer 1 minute), so the run nearly stood still; afterwards it was
+kept awake with `caffeinate -i -w <PID of work/run_timings.sh>`. Long runs should be
+started under `caffeinate -i` (see "Reproducing"). The Mac slept once more (lid closed
+to move it, 17:16–17:34) and the run simply continued afterwards.
+
+**Full precision, all 48 videos** (12:54–22:16, 33,734 s including about 1.7 hours of
+sleep; 1.34 s per second of audio while awake, as before). **The text is word-for-word the
+same as before in all 48 videos** (`.words.json` and `.srt`), including the videos that
+were being transcribed while the Mac slept. Timings (25,700 words matched):
+
+| against | start: median | quartiles | within 0.2 s | end: median | within 0.2 s |
+|---|---|---|---|---|---|
+| whisper | +0.05 s | 0.00 to +0.13 | 86% | +0.05 s | 82% |
+| parakeet | −0.06 s | −0.14 to +0.02 | 85% | −0.07 s | 77% |
+| canary | 0.00 s | −0.08 to +0.04 | 88% | 0.00 s | 84% |
+
+Canary, timed in an entirely different way (CTC alignment), agrees with Voxtral Realtime
+with a median difference of 0.
+
+### The majority vote with both engines timed
+The standard six-engine vote (`work/align/`, `work/vote/`; the previous ones are in
+`work/run3/`):
+
+| | before | Canary timed | both timed |
+|---|---|---|---|
+| vote words needing an estimated timing (`fill_times`) | 148 | 20 | **1** |
+
+All scores stay exactly the same: support, WER and CER per engine and per series, and
+the pairwise WER per window and for the whole file. The words of Canary and Voxtral
+Realtime stay within their own piece, and the pieces are the windows, so no word moves
+to another window. Per-window and whole-file WER therefore can't get closer. This also
+means the earlier comparisons were not distorted by the piece timings.
+
+The vote `.srt` files keep the same words. Cue times moved by a median of 25 ms at the
+start and 0.1 s at the end (95%: 0.14 s and 0.31 s).
+
+**Overlapping cues.** Real timings made a flaw more visible: a vote word's timing is the
+median of the engines that voted for it, so a word can come out earlier than the one
+before it. Example (`sint/LeesWijs-bladerboek-4`, 0:09): Canary writes "Sint-Teklaas?",
+which normalizes to "sint" + "teklaas", and both parts get the whole word's timing
+(9.45–12.17 s). The vote keeps "Sinterklaas" (other engines, until 10.64 s) plus an extra
+"teklaas" from Canary alone, which now starts at 9.45 s. Before, it had no timing and
+`fill_times` put it at 11.84 s. Overlapping cue pairs in the vote `.srt` files: 18 before,
+30 with both engines timed (up to 1.5 s). `align.py` now lets no vote word start before
+the previous one ends (`in_order`), which leaves 0 overlaps. Words and scores are
+unchanged.
+
 ## Reproducing
 
 Every command used so far, grouped by purpose. Run from the repository root on an Apple
@@ -1506,27 +1622,42 @@ folders, grouping videos by their folder under `videos/`.)
 
 ### Word timings
 
-Calibration on the test video: set `CANARY_START_OFFSET` and `CANARY_END_OFFSET` in
-`transcribe.py` to 0, transcribe, and try offsets with `timings.py --shift START END` (a
-start is moved START seconds earlier, but not before the previous word's end; an end END
-seconds earlier):
+Calibration on the test video: set `VOXTRAL_RT_START_OFFSET`, `VOXTRAL_RT_END_OFFSET`,
+`CANARY_START_OFFSET` and `CANARY_END_OFFSET` in `transcribe.py` to 0, transcribe, and try
+offsets with `timings.py --shift START END` (a start is moved START seconds earlier, but not
+before the previous word's end; an end END seconds earlier):
 
 ```sh
+./venv/bin/python transcribe.py --engine voxtral-rt \
+    --model mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit \
+    --output-dir work/test/timings/rt4-offset0 videos/vos/LeesWijs-bladerboek-33.mp4
 ./venv/bin/python transcribe.py --engine canary \
     --output-dir work/test/timings/canary-offset0 videos/vos/LeesWijs-bladerboek-33.mp4
+for s in 0.44 0.5 0.56 0.64 0.72 0.8 1.0; do for e in 0.12 0.16 0.2 0.24; do
+  echo "== $s $e"; ./venv/bin/python timings.py work/test/timings/rt4-offset0 \
+      work/whisper work/parakeet --shift $s $e
+done; done
 for s in 0.04 0.08 0.12 0.16; do for e in 0 -0.04 -0.08 -0.12; do
   echo "== $s $e"; ./venv/bin/python timings.py work/test/timings/canary-offset0 \
       work/whisper work/parakeet --shift $s $e
 done; done
 ```
 
-Then with the chosen offsets back in `transcribe.py`, all 48 videos (earlier outputs were
-copied to `work/run3/` first):
+Then with the chosen offsets back in `transcribe.py`: the full-precision test
+(`--output-dir work/test/timings/rt16`, same video), and the reruns of all 48 videos, one
+after the other (`work/run_timings.sh`, log in `work/run_timings.log`; earlier outputs
+were copied to `work/run3/` first). Start it under `caffeinate -i` (for example
+`caffeinate -i work/run_timings.sh`), or the Mac may go to sleep during the run:
 
 ```sh
 mkdir -p work/run3 && cp -Rp work/canary work/voxtral-rt work/voxtral-rt-4bit work/vote \
     work/align work/run3/
-./venv/bin/python transcribe.py --engine canary --output-dir work/canary videos/*/*.mp4
+for step in "canary work/canary" \
+            "voxtral-rt work/voxtral-rt-4bit mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit" \
+            "voxtral-rt work/voxtral-rt"; do
+  set -- $step
+  ./venv/bin/python transcribe.py --engine $1 ${3:+--model $3} --output-dir $2 videos/*/*.mp4
+done
 ./venv/bin/python timings.py work/canary work/whisper work/parakeet
 ```
 
@@ -1534,9 +1665,9 @@ Checking that the text didn't change: compare the `word` fields of each `.words.
 `work/run3/<engine>/` and `work/<engine>/`, and `compare.words_of` of their `.srt` files.
 
 The vote before and after, with the standard engines. `work/test/timings/base/` and
-`work/test/timings/new/` hold symbolic links to the engine folders: `base` to Canary in
-`work/run3/`, `new` to the retimed Canary in `work/canary/`, Voxtral Realtime to
-`work/run3/voxtral-rt/` and the others to `work/<engine>` in both:
+`work/test/timings/new/` hold symbolic links to the engine folders: `base` to Canary and
+Voxtral Realtime in `work/run3/`, `new` to the retimed Canary in `work/canary/`, the others
+to `work/<engine>` in both:
 
 ```sh
 for v in base new; do
@@ -1549,3 +1680,17 @@ done
 
 `summary-base.txt` is identical to `work/run3/align/summary.txt` apart from the new line
 counting words without a timing.
+
+After the full-precision run, the standard vote with both engines timed (and `in_order`):
+
+```sh
+./venv/bin/python timings.py work/voxtral-rt work/whisper work/parakeet work/canary
+./venv/bin/python align.py work/whisper work/canary work/voxtral-rt work/parakeet \
+    work/wav2vec2-lm work/vosk --out work/align --vote work/vote \
+    --lexicon work/test/nl-words.txt > work/align/summary.txt
+```
+
+The cue shifts and overlaps were counted with `compare.load_engine` on the vote folders
+(`work/test/timings/vote-base`, `vote-new` and `work/vote`). Shifts were measured between
+cues with the same text, each matched to the nearest cue with that text. Overlaps are
+cues that start before the previous cue ends.

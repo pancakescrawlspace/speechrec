@@ -16,7 +16,8 @@ Engines:
     canary    NVIDIA Canary 1B v2 via mlx-audio, on pieces of the audio (see
               split_at_pauses); word timings by aligning its text to its CTC model
     voxtral   Mistral Voxtral Mini 3B via mlx-audio; no timestamps either
-    voxtral-rt  Mistral Voxtral Mini 4B Realtime via mlx-audio, on the same pieces
+    voxtral-rt  Mistral Voxtral Mini 4B Realtime via mlx-audio, on the same pieces;
+              word timings from its token positions
 
 The .srt is written next to each video with the same basename, unless
 --output-dir is given. Engines other than whisper add their name to the file
@@ -24,8 +25,9 @@ name (video.parakeet.srt) so they never overwrite the whisper subtitles.
 
 Next to each .srt goes a .words.json (video.words.json, video.parakeet.words.json)
 with every recognised word and its timing in seconds, for comparing engines word
-by word. The Voxtrals have no word timings: their words get the start and end of
-the audio piece they came from. Canary's words are timed with its CTC model.
+by word. Voxtral 3B has no word timings: its words get the start and end of the
+audio piece they came from. Canary's words are timed with its CTC model, Voxtral
+Realtime's from the positions of its tokens.
 """
 
 import argparse
@@ -75,6 +77,14 @@ CUE_PAUSE_SECONDS = 0.8
 # Engines without timestamps of their own (Canary, both Voxtrals) get the audio in pieces
 # of at most this length, cut at the quietest moment.
 MAX_PIECE_SECONDS = 15.0
+
+# Voxtral Realtime emits one token per 1,280 samples (80 ms) of 16 kHz audio. A word's
+# first token comes once most of the word has been heard, so its start is earlier than
+# its first token by more than its end is earlier than its last. Offsets in seconds,
+# calibrated against Whisper and Parakeet (see JOURNAL.md).
+RAW_SAMPLES_PER_VOXTRAL_RT_TOKEN = 1280
+VOXTRAL_RT_START_OFFSET = 0.64
+VOXTRAL_RT_END_OFFSET = 0.20
 
 # Canary's words are timed by aligning its text to the frames (80 ms) of its CTC model.
 # A token's CTC spike is short, so its end is moved later (a negative offset). Offsets
@@ -432,21 +442,97 @@ def run_voxtral(wav: Path, model: str, language: str,
     return cues, words
 
 
+def voxtral_rt_tokens(model, audio, max_tokens: int = 4096) -> list[int]:
+    """Voxtral Realtime's output tokens for a piece of audio, one per 80 ms of audio.
+
+    A copy of the decoding loop in mlx-audio's Model.generate (0.5.5, greedy), which
+    only returns the text; the index of each token is what gives it its time.
+    """
+    import mlx.core as mx
+
+    adapter_out, n_audio, prompt_len, logits, cache, enc_chunk_gen, _ = (
+        model._encode_and_prefill(audio))
+    adapter_len = adapter_out.shape[0]
+    eos = model.config.eos_token_id
+    generated = []
+    next_tok = mx.argmax(logits)
+    mx.async_eval(next_tok)
+    for pos in range(prompt_len, n_audio):
+        token = int(next_tok.item())
+        generated.append(token)
+        if token == eos or len(generated) > max_tokens:
+            break
+        if enc_chunk_gen is not None and pos >= adapter_len:
+            try:
+                chunk_adapter = model.encoder.downsample_and_project(next(enc_chunk_gen))
+                mx.eval(chunk_adapter)
+                adapter_out = mx.concatenate([adapter_out, chunk_adapter], axis=0)
+                adapter_len = adapter_out.shape[0]
+            except StopIteration:
+                enc_chunk_gen = None
+        embed = model.decoder.embed_token(token)
+        if pos < adapter_len:
+            embed = adapter_out[pos] + embed
+        h, cache = model.decoder.forward(embed[None, :], start_pos=pos, cache=cache)
+        next_tok = mx.argmax(model.decoder.logits(h.squeeze(0)))
+        mx.async_eval(next_tok)
+        if len(generated) % 256 == 0:
+            mx.clear_cache()
+    else:
+        generated.append(int(next_tok.item()))
+    mx.clear_cache()
+    if generated and generated[-1] == eos:
+        generated.pop()
+    return generated
+
+
+def voxtral_rt_words(model, audio, rate: int) -> tuple[str, list[Word]]:
+    """Voxtral Realtime's text for a piece of audio, and its words timed from 0.
+
+    Token i is emitted after hearing the audio up to about i × 80 ms plus the
+    model's delay. A word ends VOXTRAL_RT_END_OFFSET before the end of its last
+    token, and starts VOXTRAL_RT_START_OFFSET before its first token, but not
+    before the previous word ends.
+    """
+    tokens = voxtral_rt_tokens(model, audio)
+    tokenizer = model._tokenizer
+    # The byte offset where each token's text ends, to find the token of any byte.
+    ends, n = [], 0
+    for token in tokens:
+        n += len(tokenizer.token_bytes(token))
+        ends.append(n)
+    raw = tokenizer.decode(tokens)
+    text = raw.strip()
+    lead = len(raw) - len(raw.lstrip())
+
+    def token_of(char: int) -> int:
+        return bisect.bisect_right(ends, len(raw[:lead + char].encode()))
+
+    step = RAW_SAMPLES_PER_VOXTRAL_RT_TOKEN / rate
+    words, previous_end = [], 0.0
+    for m in re.finditer(r"\S+", text):
+        first, last = token_of(m.start()), token_of(m.end() - 1)
+        end = max(0.0, (last + 1) * step - VOXTRAL_RT_END_OFFSET)
+        start = min(max(first * step - VOXTRAL_RT_START_OFFSET, previous_end), end)
+        words.append((start, end, m.group()))
+        previous_end = end
+    return text, words
+
+
 def run_voxtral_rt(wav: Path, model: str, language: str,
                    prompt: str) -> tuple[list[Cue], list[Word]]:
     import soundfile
 
     # A streaming model: it detects the language itself and takes no prompt. It could
     # take a whole video, but emits one token per 80 ms of audio (7,500 for a 10-minute
-    # video, beyond its default limit of 4,096), and gives no word timings; so it gets
-    # the same pieces as Canary and Voxtral.
+    # video, beyond its default limit of 4,096); so it gets the same pieces as Canary
+    # and Voxtral. Its word timings come from the positions of its tokens.
     audio, rate = soundfile.read(wav, dtype="float32")
-    cues, words = [], []
+    words = []
     for a, b in split_at_pauses(audio, rate):
-        text = load_mlx_audio(model).generate(audio[a:b]).text
-        cues += text_to_cues(text, a / rate, b / rate)
-        words += [(a / rate, b / rate, w) for w in text.split()]
-    return cues, words
+        _, piece = voxtral_rt_words(load_mlx_audio(model), audio[a:b], rate)
+        words += [(a / rate + s, min(b / rate, a / rate + e), w) for s, e, w in piece]
+    return words_to_cues(words), words
 
 
 ENGINES = {

@@ -62,8 +62,9 @@ from transcribe import extract_audio, split_at_pauses, words_to_cues, write_srt
 # A word supported by at most this many other engines is marked in the Markdown output.
 MARK_SUPPORT = 1
 
-# The Voxtrals' words carry the timing of their whole 15 s piece (and Canary's did, before
-# it got word timings). Timings this long are not used for the majority-vote subtitles.
+# Voxtral 3B's words carry the timing of their whole 15 s piece (and Canary's and Voxtral
+# Realtime's did, before they got word timings). Timings this long are not used for the
+# majority-vote subtitles.
 MAX_WORD_SECONDS = 3.0
 
 
@@ -102,7 +103,7 @@ def split_into_windows(words: list[tuple[float, float, str]],
     """Tokens per window, placed by the midpoint of their timing."""
     result: list[list[Token]] = [[] for _ in windows]
     i = 0
-    # Sort on start time only: Voxtral's words all share their piece's
+    # Sort on start time only: Voxtral 3B's words all share their piece's
     # timing, and a stable sort keeps them in spoken order.
     for start, end, word in sorted(words, key=lambda w: w[0]):
         mid = (start + end) / 2
@@ -220,10 +221,11 @@ def most_common(forms: list[str]) -> str:
 
 
 def fill_times(words, window: tuple[float, float]) -> list[tuple[float, float, str]]:
-    """Give words without timing (only voted for by Canary/Voxtral) a spot in between.
+    """Give words without timing (only voted for by Voxtral 3B) a spot in between.
 
     A run of such words goes just before the next word with a timing, at most 0.4 s per
-    word: a word only Canary and Voxtral heard is usually spoken right before the next.
+    word: a word only engines without word timings heard is usually spoken right before
+    the next.
     At the end of a window, with no timed word after it, the run follows the previous.
     """
     filled, prev_end, i = [], window[0], 0
@@ -243,6 +245,23 @@ def fill_times(words, window: tuple[float, float]) -> list[tuple[float, float, s
             prev_end = words[j][1]
         i = j + 1
     return filled
+
+
+def in_order(words: list[tuple[float, float, str]]) -> list[tuple[float, float, str]]:
+    """Let no word start before the previous one ends, so the subtitles don't overlap.
+
+    A word's timing is the median of the engines that voted for it, and different words
+    get different voters, so a word can come out earlier than the one before it: an extra
+    word that only Canary has from splitting "Sint-Teklaas?" gets Canary's timing of the
+    whole word.
+    """
+    result, previous_end = [], 0.0
+    for start, end, word in words:
+        start = max(start, previous_end)
+        end = max(end, start)
+        result.append((start, end, word))
+        previous_end = end
+    return result
 
 
 def char_errors(reference: list[str], hypothesis: list[str]) -> tuple[int, int]:
@@ -363,7 +382,7 @@ def main() -> int:
         if args.out:
             (args.out / f"{video}.md").write_text("\n".join(lines), encoding="utf-8")
         if args.vote:
-            write_srt(words_to_cues(vote_srt_words), args.vote / f"{video}.srt")
+            write_srt(words_to_cues(in_order(vote_srt_words)), args.vote / f"{video}.srt")
 
     totals = {n: [sum(by_series[x][n][k] for x in by_series) for k in range(4)]
               for n in names}
