@@ -81,9 +81,11 @@ videos in the same process.
   (worked around by running each video in its own process).
 - Voxtral: stop the invented sentence on music/silence properly, e.g. by skipping pieces
   without speech (voice activity detection) instead of filtering its text afterwards.
-- Voxtral Realtime: run the remaining 36 videos (about 5.6 hours; the 4-bit version
-  `mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit`, 3.1 GB, might be 2–3× faster), and
-  derive real word timings from its token positions.
+- Voxtral Realtime 4-bit (`mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit`, 3.1 GB):
+  measure speed and accuracy against the full-precision version. Running since
+  2026-09-24 04:28 (`work/run_4bit.sh`, log in `work/run_4bit.log`), output in
+  `work/voxtral-rt-4bit/`, the 12 sample videos first.
+- Voxtral Realtime: derive real word timings from its token positions.
 - Proper timestamps for Canary via its CTC model (forced alignment).
 - Hand-correct a reference set (René), starting from the vote `.srt` files in `work/vote/`,
   then score all engines against it with `compare.py --reference references`.
@@ -791,6 +793,47 @@ Conclusions:
 - Its drawback is speed: slower than real time on this Mac (about 1.3×), so the remaining
   36 videos (4.3 hours of video) would take about 5.6 hours.
 
+### Voxtral Realtime on all 48 videos
+The remaining 36 videos took 20,913 s (22:40 to about 04:25), about 1.35 s per second of
+audio. Since it doesn't invent text, Voxtral Realtime replaces Voxtral 3B in the standard
+six-engine vote (Whisper, Canary, Voxtral Realtime, Parakeet, wav2vec2-lm, Vosk). All 48
+videos:
+
+| engine | ≥ 3 of 5 support | WER vs vote | CER vs vote | wrong words | real word | non-word |
+|---|---|---|---|---|---|---|
+| whisper | 92.2% | 6.6% | 5.1% | 631 | 83.4% | 16.6% |
+| canary | 90.5% | 7.0% | 3.3% | 1,615 | 72.1% | 27.9% |
+| voxtral-rt | 91.4% | 6.2% | 2.8% | 1,290 | 76.7% | 23.3% |
+| parakeet | 89.3% | 11.1% | 6.0% | 2,034 | 75.8% | 24.2% |
+| wav2vec2-lm | 82.4% | 19.0% | 8.8% | 4,433 | 82.7% | 17.3% |
+| vosk | 84.6% | 21.5% | 13.0% | 3,669 | 98.3% | 1.7% |
+
+| series | whisper | canary | voxtral-rt | parakeet | wav2vec2-lm | vosk |
+|---|---|---|---|---|---|---|
+| balotje | 7.0% | 5.6% | 5.5% | 9.0% | 12.2% | 14.6% |
+| beestje | 23.8% | 7.6% | 9.7% | 16.5% | 28.4% | 40.1% |
+| bentje | 3.8% | 7.2% | 5.9% | 14.1% | 15.9% | 19.8% |
+| eend | 2.6% | 6.5% | 4.2% | 13.0% | 18.3% | 17.0% |
+| help | 8.5% | 8.9% | 4.3% | 15.3% | 17.4% | 11.3% |
+| jake | 4.0% | 8.9% | 7.0% | 13.5% | 25.5% | 20.0% |
+| kerst | 7.7% | 7.6% | 8.6% | 8.8% | 20.2% | 32.9% |
+| lammetje | 11.1% | 5.1% | 5.6% | 5.6% | 15.4% | 23.5% |
+| rinus | 5.0% | 8.1% | 5.9% | 12.8% | 16.7% | 11.6% |
+| sint | 9.4% | 10.4% | 11.3% | 8.9% | 24.5% | 37.9% |
+| tim | 4.1% | 4.5% | 4.7% | 26.1% | 23.4% | 17.9% |
+| vos | 5.6% | 4.2% | 3.4% | 4.6% | 15.5% | 15.3% |
+
+- **Voxtral Realtime has the lowest error rates** against the vote, and is the most
+  consistent across series (at most 11.3%; Whisper goes up to 23.8% in `beestje`).
+- Whisper makes by far the fewest wrong words (631), but WER also counts missing words,
+  and Whisper skips passages.
+- Voxtral Realtime is the closest to both Whisper and Canary (about 10.5% pairwise).
+- As always: these are measured against the majority. Only the hand-corrected references
+  will tell which engine is actually most accurate.
+
+The vote files now have 28,637 words. The previous summary (with Voxtral 3B in the vote)
+is kept in `work/test/summary-with-voxtral3b.txt`.
+
 ## Reproducing
 
 Every command used so far, grouped by purpose. Run from the repository root on an Apple
@@ -1324,4 +1367,34 @@ from `work/`):
 # Voxtral Realtime as a full member of the vote (align.py uses the 12 videos all have)
 ./venv/bin/python align.py work/whisper work/canary work/voxtral-rt work/parakeet \
     work/wav2vec2-lm work/vosk --lexicon work/test/nl-words.txt
+```
+
+The remaining 36 videos:
+
+```sh
+ls videos/*/*.mp4 | grep -v -x -F -f work/test/rt-sample.txt > work/test/rt-rest.txt
+./venv/bin/python transcribe.py --engine voxtral-rt --output-dir work/voxtral-rt \
+    $(cat work/test/rt-rest.txt)
+```
+
+The 4-bit version, chained after the full-precision run (`work/run_4bit.sh`, started with the
+PID of the running full-precision job; it downloads the model first, waits for that process
+to end, then transcribes the 12 sample videos and then the other 36):
+
+```sh
+MODEL=mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit
+./venv/bin/python -c "from huggingface_hub import snapshot_download; snapshot_download('$MODEL')"
+while kill -0 $PID 2>/dev/null; do sleep 60; done
+for list in work/test/rt-sample.txt work/test/rt-rest.txt; do
+  ./venv/bin/python transcribe.py --engine voxtral-rt --model $MODEL \
+      --output-dir work/voxtral-rt-4bit $(cat $list)
+done
+```
+
+The standard comparison with Voxtral Realtime instead of Voxtral 3B:
+
+```sh
+./venv/bin/python align.py work/whisper work/canary work/voxtral-rt work/parakeet \
+    work/wav2vec2-lm work/vosk --out work/align --vote work/vote \
+    --lexicon work/test/nl-words.txt > work/align/summary.txt
 ```

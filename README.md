@@ -93,7 +93,7 @@ separate process, because otherwise earlier videos in the same run affect the re
 To run all engines on all videos, one output folder per engine:
 
 ```sh
-for e in whisper parakeet wav2vec2-lm vosk canary voxtral; do
+for e in whisper parakeet wav2vec2-lm vosk canary voxtral-rt; do
   ./venv/bin/python transcribe.py --engine $e --output-dir work/$e videos/*/*.mp4
 done
 ```
@@ -121,7 +121,7 @@ requiring more than one engine to disagree gives a much shorter list.
 `align.py` uses these to compare all engines word by word:
 
 ```sh
-./venv/bin/python align.py work/whisper work/canary work/voxtral work/parakeet \
+./venv/bin/python align.py work/whisper work/canary work/voxtral-rt work/parakeet \
     work/wav2vec2-lm work/vosk --out work/align --vote work/vote
 ```
 
