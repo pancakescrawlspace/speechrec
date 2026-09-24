@@ -13,8 +13,8 @@ Engines:
     wav2vec2-lm  The same, decoded with the model's own Dutch 5-gram language model
               (needs kenlm and pyctcdecode, see JOURNAL.md)
     vosk      Vosk (Kaldi) with its large Dutch model; lowercase, no punctuation
-    canary    NVIDIA Canary 1B v2 via mlx-audio; no timestamps of its own, so cue
-              timing is approximate (see split_at_pauses)
+    canary    NVIDIA Canary 1B v2 via mlx-audio, on pieces of the audio (see
+              split_at_pauses); word timings by aligning its text to its CTC model
     voxtral   Mistral Voxtral Mini 3B via mlx-audio; no timestamps either
     voxtral-rt  Mistral Voxtral Mini 4B Realtime via mlx-audio, on the same pieces
 
@@ -24,12 +24,14 @@ name (video.parakeet.srt) so they never overwrite the whisper subtitles.
 
 Next to each .srt goes a .words.json (video.words.json, video.parakeet.words.json)
 with every recognised word and its timing in seconds, for comparing engines word
-by word. Canary and Voxtral have no word timings: their words get the start and
-end of the audio piece they came from.
+by word. The Voxtrals have no word timings: their words get the start and end of
+the audio piece they came from. Canary's words are timed with its CTC model.
 """
 
 import argparse
+import bisect
 import functools
+import itertools
 import json
 import re
 import subprocess
@@ -70,9 +72,15 @@ MAX_CUE_WORDS = 14
 MAX_CUE_SECONDS = 7.0
 CUE_PAUSE_SECONDS = 0.8
 
-# Engines without timestamps (Canary, Voxtral) get the audio in pieces of at most this
-# length, cut at the quietest moment; each piece's text is spread over its span.
+# Engines without timestamps of their own (Canary, both Voxtrals) get the audio in pieces
+# of at most this length, cut at the quietest moment.
 MAX_PIECE_SECONDS = 15.0
+
+# Canary's words are timed by aligning its text to the frames (80 ms) of its CTC model.
+# A token's CTC spike is short, so its end is moved later (a negative offset). Offsets
+# in seconds, calibrated against Whisper and Parakeet (see JOURNAL.md).
+CANARY_START_OFFSET = 0.12
+CANARY_END_OFFSET = -0.04
 
 
 @dataclass
@@ -278,19 +286,133 @@ def load_mlx_audio(model: str):
     return load(model)
 
 
+@functools.cache
+def load_canary_ctc(model: str):
+    """Canary's separate CTC model (in the ctc/ folder of the model repo): encoder and head.
+
+    Its own recognised text is poor; it is only used to time Canary's text. The encoder
+    is the same FastConformer as Canary's, without biases, so mlx-audio's classes and
+    weight mapping for Canary load it.
+    """
+    import mlx.core as mx
+    import numpy as np
+    from huggingface_hub import snapshot_download
+    from mlx_audio.stt.models.canary.canary import CanaryEncoder, Model
+    from mlx_audio.stt.models.canary.config import ModelConfig
+
+    path = Path(snapshot_download(model, allow_patterns=["ctc/*"])) / "ctc"
+    weights = Model._sanitize_nemo(None, mx.load(str(path / "model.safetensors")))
+    # Its config.json is a copy of Canary's: the CTC encoder has fewer layers.
+    config = json.loads((path / "config.json").read_text())
+    config["encoder"]["use_bias"] = False
+    config["encoder"]["n_layers"] = 1 + max(
+        int(k.split(".")[3]) for k in weights if k.startswith("encoder.conformer.layers."))
+    config = ModelConfig.from_dict(config)
+    encoder = CanaryEncoder(config)
+    encoder.load_weights([(k[len("encoder."):], v) for k, v in weights.items()
+                          if k.startswith("encoder.")])
+    encoder.eval()
+    head = np.load(path / "ctc_head.npz")  # blank is the last class
+    return config, encoder, mx.array(head["W"]), mx.array(head["b"])
+
+
+def ctc_align(log_probs, tokens: list[int], blank: int) -> list[tuple[int, int]] | None:
+    """The best path of tokens through CTC frames (Viterbi): first and last frame per token.
+
+    None if the tokens don't fit in the frames.
+    """
+    import numpy as np
+
+    n_frames, n = len(log_probs), 2 * len(tokens) + 1
+    states = np.full(n, blank)
+    states[1::2] = tokens
+    # A token may follow the token before the previous blank directly, unless equal.
+    skip = np.zeros(n, bool)
+    skip[3::2] = states[3::2] != states[1:-2:2]
+    score = np.full(n, -np.inf)
+    score[:2] = log_probs[0, states[:2]]
+    back = np.zeros((n_frames, n), np.int8)  # how many states back each came from
+    for t in range(1, n_frames):
+        options = np.stack([score,
+                            np.concatenate([[-np.inf], score[:-1]]),
+                            np.where(skip, np.concatenate([[-np.inf] * 2, score[:-2]]), -np.inf)])
+        back[t] = np.argmax(options, axis=0)
+        score = options[back[t], np.arange(n)] + log_probs[t, states]
+    state = n - 1 if n == 1 or score[-1] >= score[-2] else n - 2
+    if not np.isfinite(score[state]):
+        return None
+    path = [0] * n_frames
+    for t in range(n_frames - 1, -1, -1):
+        path[t] = state
+        state -= int(back[t, state])
+    spans = [[None, None] for _ in tokens]
+    for t, state in enumerate(path):
+        if state % 2:
+            span = spans[state // 2]
+            span[0] = t if span[0] is None else span[0]
+            span[1] = t
+    return [tuple(span) for span in spans]
+
+
+def canary_words(model: str, audio, rate: int, text: str) -> list[Word] | None:
+    """Time Canary's words in a piece of audio, from 0, by aligning them to the CTC model.
+
+    A word runs from the first frame of its first token to the last of its last, moved
+    by CANARY_START_OFFSET and CANARY_END_OFFSET, and starts no earlier than the
+    previous word ends. None if the text can't be aligned.
+    """
+    import mlx.core as mx
+    import numpy as np
+    from types import SimpleNamespace
+    from mlx_audio.stt.models.canary.canary import Model
+
+    config, encoder, weight, bias = load_canary_ctc(model)
+    mel = Model._preprocess_audio(SimpleNamespace(config=config), audio).astype(mx.bfloat16)
+    frames, _ = encoder(mel, mx.array([mel.shape[1]]))
+    logits = frames[0].astype(mx.float32) @ weight.T + bias
+    log_probs = np.array(logits - mx.logsumexp(logits, axis=-1, keepdims=True))
+
+    sp = load_mlx_audio(model)._tokenizer.sp
+    tokens = sp.encode(text)
+    pieces = [sp.id_to_piece(t).replace("\u2581", " ") for t in tokens]
+    spans = ctc_align(log_probs, tokens, blank=weight.shape[0] - 1) if tokens else None
+    if spans is None:
+        return None
+    # The character offset where each token's text ends, to find the token of a character.
+    ends = list(itertools.accumulate(len(p) for p in pieces))
+    spelled = "".join(pieces)
+    found = list(re.finditer(r"\S+", spelled))
+    if len(found) != len(text.split()):
+        return None
+    step = config.encoder.subsampling_factor * config.preprocessor.window_stride
+    words, previous_end = [], 0.0
+    for m, word in zip(found, text.split()):
+        first = bisect.bisect_right(ends, m.start())
+        last = bisect.bisect_right(ends, m.end() - 1)
+        end = max(0.0, (spans[last][1] + 1) * step - CANARY_END_OFFSET)
+        start = min(max(spans[first][0] * step - CANARY_START_OFFSET, previous_end), end)
+        words.append((start, end, word))
+        previous_end = end
+    return words
+
+
 def run_canary(wav: Path, model: str, language: str,
                prompt: str) -> tuple[list[Cue], list[Word]]:
     import soundfile
 
-    # Canary has no prompt; --prompt doesn't apply.
+    # Canary has no prompt; --prompt doesn't apply. Its words are timed with its CTC
+    # model; a piece whose text can't be aligned gives its words the piece's timing.
     audio, rate = soundfile.read(wav, dtype="float32")
-    cues, words = [], []
+    words = []
     for a, b in split_at_pauses(audio, rate):
         text = load_mlx_audio(model).generate(
             audio[a:b], source_lang=language, target_lang=language, use_pnc=True).text
-        cues += text_to_cues(text, a / rate, b / rate)
-        words += [(a / rate, b / rate, w) for w in text.split()]
-    return cues, words
+        timed = canary_words(model, audio[a:b], rate, text) if text.strip() else []
+        if timed is None:
+            print(f"  could not align {a / rate:.1f}-{b / rate:.1f} s: {text!r}", file=sys.stderr)
+            timed = [(0.0, (b - a) / rate, w) for w in text.split()]
+        words += [(a / rate + s, min(b / rate, a / rate + e), w) for s, e, w in timed]
+    return words_to_cues(words), words
 
 
 def run_voxtral(wav: Path, model: str, language: str,

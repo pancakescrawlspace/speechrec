@@ -82,7 +82,6 @@ videos in the same process.
 - Voxtral: stop the invented sentence on music/silence properly, e.g. by skipping pieces
   without speech (voice activity detection) instead of filtering its text afterwards.
 - Voxtral Realtime: derive real word timings from its token positions.
-- Proper timestamps for Canary via its CTC model (forced alignment).
 - Hand-correct a reference set (René), starting from the vote `.srt` files in `work/vote/`,
   then score all engines against it with `compare.py --reference references`.
 
@@ -872,6 +871,65 @@ No invented text either: its most repeated cues are the story refrains ("Vroeg V
 Mac: nearly the same accuracy, faster than real time. The full-precision output stays the
 one in the standard vote, since that is what was measured against the other engines.
 
+## 2026-09-24
+
+### Word timings for Canary (CTC forced alignment)
+The model repo `CogniSoftOrg/canary-1b-v2-mlx-bf16` has a `ctc/` folder with a separate
+FastConformer encoder and a CTC head (16,385 classes, blank last). Findings while loading
+it:
+- Its `config.json` is a copy of the main model's and is wrong for it: the CTC encoder has
+  **24 layers, not 32, and no biases**. `load_canary_ctc` takes the layer count from the
+  weights and sets `use_bias` off, then uses mlx-audio's `CanaryEncoder` and Canary's
+  NeMo weight mapping (`_sanitize_nemo`, the same path the main model's weights take).
+- The tokenizer is the same file as the main model's (same blob), so Canary's text is
+  re-encoded with it and force-aligned to the CTC frames (80 ms: 8 × 10 ms).
+- Forced alignment: a short Viterbi in NumPy (`ctc_align`). The audio preprocessing is
+  mlx-audio's own (no dither applied), so it is deterministic.
+
+Pieces with empty text are skipped. Pieces whose text has more tokens than the piece has
+frames can't be aligned. Only Canary's runaway repetitions do that ("Mooitje: Mooitje: …",
+a run of `'`, "Ayeeee…"; 3 pieces in all 48 videos), and their words keep the piece's
+timing.
+
+**Calibration** on `vos/LeesWijs-bladerboek-33`: a new script, `timings.py`, aligns
+Canary's words with Whisper's and Parakeet's (`jiwer`) and compares the start and end
+times of equal words. For comparison, Parakeet against Whisper: starts +0.10 s, quartiles
++0.04 to +0.18 (Whisper places words about 0.1 s earlier than Parakeet and Vosk).
+The raw alignment (a word from the first frame of its first token to the end of the
+last frame of its last) puts Canary's starts +0.15 s after Whisper's and +0.07 s after
+Parakeet's, and its ends 0.00 and −0.10 s from theirs (CTC spikes are short). A grid over a
+start and an end offset (`timings.py --shift` on the raw times; a start may not come
+before the previous word's end) gave **start 0.12 s, end −0.04 s** (the end moves 40 ms
+later): starts +0.06 s against Whisper and −0.03 s against Parakeet, 97% of them within
+0.2 s of Parakeet's.
+
+On all 48 videos (25,000 words matched):
+
+| against | start: median | quartiles | within 0.2 s | end: median | within 0.2 s |
+|---|---|---|---|---|---|
+| whisper | +0.07 s | +0.02 to +0.14 | 83% | +0.05 s | 80% |
+| parakeet | −0.02 s | −0.08 to +0.02 | 97% | −0.04 s | 83% |
+
+All 48 videos took 419 s (before: 377 s without timings), output in `work/canary/`.
+The previous outputs of Canary, both Voxtral Realtimes, the vote and the alignment were
+copied to `work/run3/` first (Voxtral Realtime is getting word timings too, in progress).
+**The text is word-for-word the same in all 48 videos**, in the `.words.json` and in the
+`.srt` files.
+
+Canary's `.srt` cues are now made from its word timings (`words_to_cues`, like
+Parakeet's), no longer by sharing each piece's time out by text length. The cue
+boundaries differ, the words don't.
+
+Effect on the standard six-engine vote (`align.py` now also prints how many vote words
+have no timing of their own):
+- Vote words that need an estimated timing (`fill_times`): **148 → 20** of 28,637.
+- All scores (support, WER, CER per engine, per series, pairwise per window and whole
+  file) are exactly the same. The windows are the same pieces Canary's words came from,
+  so its words stay in the same windows.
+- The vote `.srt` files have the same words; cue times shift by a median of 25 ms at
+  the start and 70 ms at the end (95%: 0.21 s and 0.41 s), since Canary now counts in
+  each word's median.
+
 ## Reproducing
 
 Every command used so far, grouped by purpose. Run from the repository root on an Apple
@@ -1445,3 +1503,49 @@ Comparing the 4-bit and full-precision versions:
 
 (The per-series table used `compare.load_engine`, `words_of` and `error_counts` on the same
 folders, grouping videos by their folder under `videos/`.)
+
+### Word timings
+
+Calibration on the test video: set `CANARY_START_OFFSET` and `CANARY_END_OFFSET` in
+`transcribe.py` to 0, transcribe, and try offsets with `timings.py --shift START END` (a
+start is moved START seconds earlier, but not before the previous word's end; an end END
+seconds earlier):
+
+```sh
+./venv/bin/python transcribe.py --engine canary \
+    --output-dir work/test/timings/canary-offset0 videos/vos/LeesWijs-bladerboek-33.mp4
+for s in 0.04 0.08 0.12 0.16; do for e in 0 -0.04 -0.08 -0.12; do
+  echo "== $s $e"; ./venv/bin/python timings.py work/test/timings/canary-offset0 \
+      work/whisper work/parakeet --shift $s $e
+done; done
+```
+
+Then with the chosen offsets back in `transcribe.py`, all 48 videos (earlier outputs were
+copied to `work/run3/` first):
+
+```sh
+mkdir -p work/run3 && cp -Rp work/canary work/voxtral-rt work/voxtral-rt-4bit work/vote \
+    work/align work/run3/
+./venv/bin/python transcribe.py --engine canary --output-dir work/canary videos/*/*.mp4
+./venv/bin/python timings.py work/canary work/whisper work/parakeet
+```
+
+Checking that the text didn't change: compare the `word` fields of each `.words.json` in
+`work/run3/<engine>/` and `work/<engine>/`, and `compare.words_of` of their `.srt` files.
+
+The vote before and after, with the standard engines. `work/test/timings/base/` and
+`work/test/timings/new/` hold symbolic links to the engine folders: `base` to Canary in
+`work/run3/`, `new` to the retimed Canary in `work/canary/`, Voxtral Realtime to
+`work/run3/voxtral-rt/` and the others to `work/<engine>` in both:
+
+```sh
+for v in base new; do
+  d=work/test/timings/$v
+  ./venv/bin/python align.py $d/whisper $d/canary $d/voxtral-rt $d/parakeet \
+      $d/wav2vec2-lm $d/vosk --vote work/test/timings/vote-$v \
+      --lexicon work/test/nl-words.txt > work/test/timings/summary-$v.txt
+done
+```
+
+`summary-base.txt` is identical to `work/run3/align/summary.txt` apart from the new line
+counting words without a timing.

@@ -12,7 +12,7 @@ engines:
 | `parakeet` | NVIDIA Parakeet TDT 0.6B v3, via [parakeet-mlx](https://github.com/senstella/parakeet-mlx) | Multilingual (25 European languages), detects the language itself. Capitals and punctuation. |
 | `wav2vec2` | [jonatasgrosman/wav2vec2-large-xlsr-53-dutch](https://huggingface.co/jonatasgrosman/wav2vec2-large-xlsr-53-dutch), via transformers | Dutch only. Lowercase, no punctuation. |
 | `wav2vec2-lm` | The same model, decoded with its own Dutch 5-gram language model, via pyctcdecode and kenlm | Fewer garbled words, but its mistakes are more often real (wrong) words. Needs an extra setup step, see below. Slower. |
-| `canary` | NVIDIA Canary 1B v2 ([MLX conversion](https://huggingface.co/CogniSoftOrg/canary-1b-v2-mlx-bf16)), via [mlx-audio](https://github.com/Blaizzy/mlx-audio) | Multilingual (25 European languages). Capitals and punctuation. No timestamps of its own, so cue timing is approximate. |
+| `canary` | NVIDIA Canary 1B v2 ([MLX conversion](https://huggingface.co/CogniSoftOrg/canary-1b-v2-mlx-bf16)), via [mlx-audio](https://github.com/Blaizzy/mlx-audio) | Multilingual (25 European languages). Capitals and punctuation. No timestamps of its own: its words are timed by aligning them to the model's separate CTC model. |
 | `voxtral` | Mistral Voxtral Mini 3B ([MLX conversion](https://huggingface.co/mlx-community/Voxtral-Mini-3B-2507-bf16)), via mlx-audio | Multilingual. Capitals and punctuation. No timestamps of its own. Can invent text during music or silence. About 5× slower than the others. |
 | `voxtral-rt` | Mistral Voxtral Mini 4B Realtime ([MLX conversion](https://huggingface.co/mlx-community/Voxtral-Mini-4B-Realtime-2602-fp16)), via mlx-audio | Multilingual. Capitals and punctuation. No timestamps of its own. Doesn't invent text on music. Among the most accurate, but slower than real time on the Mac used here. The 4-bit version (`--model mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit`) is about 4× faster with nearly the same accuracy. |
 | `vosk` | [Vosk](https://alphacephei.com/vosk/) with `vosk-model-nl-spraakherkenning-0.6` (the [Kaldi_NL](https://github.com/opensource-spraakherkenning-nl/Kaldi_NL) model) | Dutch only, runs on the CPU. Lowercase, no punctuation. |
@@ -173,8 +173,20 @@ those words into cues itself: a new cue starts after a pause of 0.8 seconds, aft
 words, or when a cue would last longer than 7 seconds.
 
 Canary and both Voxtrals return no timings at all. The script cuts the audio into pieces of at most 15
-seconds at the quietest moment, transcribes each piece, and shares the piece's time out
-over its sentences by text length.
+seconds at the quietest moment and transcribes each piece. Then:
+
+- Canary's model repository also holds a separate CTC model. Its frames (80 ms each) are
+  force-aligned to Canary's text to time each word.
+- For both Voxtrals, the piece's time is shared out over its sentences by text length,
+  so their cue timing is approximate.
+
+Canary's words are then grouped into cues like Parakeet's. Its timings were calibrated
+against Whisper's and Parakeet's word timings (see JOURNAL.md). `timings.py` measures how
+an engine's word timings compare with other engines':
+
+```sh
+./venv/bin/python timings.py work/canary work/whisper work/parakeet
+```
 
 ## Limitations
 

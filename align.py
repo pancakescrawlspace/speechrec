@@ -62,8 +62,8 @@ from transcribe import extract_audio, split_at_pauses, words_to_cues, write_srt
 # A word supported by at most this many other engines is marked in the Markdown output.
 MARK_SUPPORT = 1
 
-# Canary and Voxtral words carry the timing of their whole 15 s piece. Timings this
-# long are not used for the majority-vote subtitles.
+# The Voxtrals' words carry the timing of their whole 15 s piece (and Canary's did, before
+# it got word timings). Timings this long are not used for the majority-vote subtitles.
 MAX_WORD_SECONDS = 3.0
 
 
@@ -102,7 +102,7 @@ def split_into_windows(words: list[tuple[float, float, str]],
     """Tokens per window, placed by the midpoint of their timing."""
     result: list[list[Token]] = [[] for _ in windows]
     i = 0
-    # Sort on start time only: Canary's and Voxtral's words all share their piece's
+    # Sort on start time only: Voxtral's words all share their piece's
     # timing, and a stable sort keeps them in spoken order.
     for start, end, word in sorted(words, key=lambda w: w[0]):
         mid = (start + end) / 2
@@ -290,6 +290,7 @@ def main() -> int:
     # Per series and engine: [word errors, vote words, char errors, vote chars].
     by_series: dict[str, dict[str, list[int]]] = {}
     pair_errors = {p: [0, 0, 0] for p in combinations(names, 2)}  # windowed, whole, ref words
+    untimed = [0, 0]  # vote words without a timing of their own, all vote words
 
     for video in videos:
         path = find_video(video)
@@ -344,6 +345,8 @@ def main() -> int:
                 ce, ctotal = char_errors(vote_norms, norms(tokens[n]))
                 for k, v in enumerate((e, total, ce, ctotal)):
                     series[n][k] += v
+            untimed[0] += sum(start is None for start, _, _ in voted)
+            untimed[1] += len(voted)
             vote_srt_words += fill_times(voted, window)
 
             lines += [f"## {fmt_time(window[0])}–{fmt_time(window[1])}", "",
@@ -374,6 +377,9 @@ def main() -> int:
         e, total, ce, ctotal = totals[n]
         print(f"| {n:<10} | {s['words']:>7} | {s['majority'] / w:>9.1%} | {s['none'] / w:>6.1%} "
               f"| {e / max(total, 1):>6.1%} | {ce / max(ctotal, 1):>6.1%} |")
+
+    print(f"\nVote words without a timing of their own (estimated by fill_times): "
+          f"{untimed[0]} of {untimed[1]} ({untimed[0] / max(untimed[1], 1):.1%})")
 
     if lexicon is not None:
         print("\nWrong and extra words against the vote: real words (invisible mistakes) "
