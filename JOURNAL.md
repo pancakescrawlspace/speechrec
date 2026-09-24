@@ -81,10 +81,6 @@ videos in the same process.
   (worked around by running each video in its own process).
 - Voxtral: stop the invented sentence on music/silence properly, e.g. by skipping pieces
   without speech (voice activity detection) instead of filtering its text afterwards.
-- Voxtral Realtime 4-bit (`mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit`, 3.1 GB):
-  measure speed and accuracy against the full-precision version. Running since
-  2026-09-24 04:28 (`work/run_4bit.sh`, log in `work/run_4bit.log`), output in
-  `work/voxtral-rt-4bit/`, the 12 sample videos first.
 - Voxtral Realtime: derive real word timings from its token positions.
 - Proper timestamps for Canary via its CTC model (forced alignment).
 - Hand-correct a reference set (René), starting from the vote `.srt` files in `work/vote/`,
@@ -834,6 +830,48 @@ videos:
 The vote files now have 28,637 words. The previous summary (with Voxtral 3B in the vote)
 is kept in `work/test/summary-with-voxtral3b.txt`.
 
+### Voxtral Realtime 4-bit
+`mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit` (3.1 GB, download 527 s), run by
+`work/run_4bit.sh` right after the full-precision run: 04:28 to 06:13, output in
+`work/voxtral-rt-4bit/`. Same engine (`--engine voxtral-rt --model …-4bit`).
+
+Speed:
+
+| | 12 sample videos (1.4 h) | other 36 (4.3 h) | per second of audio |
+|---|---|---|---|
+| full precision | about 6,500 s | 20,913 s | about 1.3 s |
+| 4-bit | 1,527 s | 4,790 s | about 0.3 s |
+
+**4.3× faster, and 3× faster than real time**: all 48 videos in 1 hour 45 minutes instead of
+7.5 hours.
+
+Accuracy, against the vote of the five engines without either Voxtral
+(`work/test/vote-no-voxtral`): full precision 7.6% WER, 4-bit 7.7%. The two versions differ
+in 2.5% of their words (no video is word-for-word identical; 28,195 against 28,202 words).
+Per series within half a point, except `beestje` (12.1% → 14.2%):
+
+| series | full | 4-bit |
+|---|---|---|
+| balotje | 6.8% | 6.8% |
+| beestje | 12.1% | 14.2% |
+| bentje | 7.2% | 7.8% |
+| eend | 5.5% | 6.0% |
+| help | 5.4% | 5.4% |
+| jake | 9.1% | 8.7% |
+| kerst | 9.4% | 9.0% |
+| lammetje | 6.1% | 5.9% |
+| rinus | 7.6% | 7.9% |
+| sint | 12.9% | 12.8% |
+| tim | 5.4% | 5.5% |
+| vos | 4.5% | 4.7% |
+
+No invented text either: its most repeated cues are the story refrains ("Vroeg Vos.",
+"Vraagt Otter.", "Ik moet op de tegels blijven, zei Tim.").
+
+**Conclusion: the 4-bit version is the practical choice** for Voxtral Realtime on this
+Mac: nearly the same accuracy, faster than real time. The full-precision output stays the
+one in the standard vote, since that is what was measured against the other engines.
+
 ## Reproducing
 
 Every command used so far, grouped by purpose. Run from the repository root on an Apple
@@ -1398,3 +1436,12 @@ The standard comparison with Voxtral Realtime instead of Voxtral 3B:
     work/wav2vec2-lm work/vosk --out work/align --vote work/vote \
     --lexicon work/test/nl-words.txt > work/align/summary.txt
 ```
+
+Comparing the 4-bit and full-precision versions:
+
+```sh
+./venv/bin/python compare.py work/voxtral-rt work/voxtral-rt-4bit --reference work/test/vote-no-voxtral
+```
+
+(The per-series table used `compare.load_engine`, `words_of` and `error_counts` on the same
+folders, grouping videos by their folder under `videos/`.)
