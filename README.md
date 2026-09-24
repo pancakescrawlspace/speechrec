@@ -98,6 +98,39 @@ for e in whisper parakeet wav2vec2-lm vosk canary voxtral-rt; do
 done
 ```
 
+### Keeping the Mac awake during long runs
+
+Some runs take hours (Voxtral Realtime at full precision: about 7.5 hours for all 48
+videos). macOS doesn't count a running job as activity: when nobody touches the Mac, it
+goes to sleep and the job stops until someone wakes it. The only sign is that the fan
+stops. On the Mac used for this project it sleeps after 1 minute, even on the charger.
+
+To check whether a slow run was asleep:
+
+```sh
+pmset -g log | grep -E "Entering Sleep|Wake from"
+```
+
+Three ways to prevent it:
+
+1. **Only during a job** (no settings change): start it with `caffeinate -i`, which keeps
+   the Mac awake until the command ends.
+
+   ```sh
+   caffeinate -i ./venv/bin/python transcribe.py --engine voxtral-rt ...
+   caffeinate -i -w PID      # for a job that is already running, by its process ID
+   ```
+
+2. **Never sleep on the charger** (battery behaviour stays as it is): System Settings →
+   Battery → Options… → "Prevent automatic sleeping on power adapter when the display is
+   off", or `sudo pmset -c sleep 0`. Undo with `sudo pmset -c sleep 1` (or another number
+   of minutes). `pmset -g custom` shows the current settings for charger and battery.
+
+3. **Lid closed:** a closed lid always puts the Mac to sleep, even with the two options
+   above, unless it runs in clamshell mode (external display and power connected).
+   `sudo pmset -a disablesleep 1` overrides even that, but a Mac that stays on in a bag
+   can overheat; undo with `sudo pmset -a disablesleep 0`.
+
 ## Comparing engines
 
 ```sh
